@@ -1,0 +1,14 @@
+[project]
+name = "career-ops-copilot"
+version = "0.1.0"
+description = "AI-assisted career operations copilot for job tracking, resume workflow management, review gates, and application follow-ups."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Ashish Gupta Silla" }]
+
+[project.scripts]
+career-ops = "career_ops.cli:main"
+
+[tool.setuptools]
+packages = ["career_ops"]

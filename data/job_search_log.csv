@@ -1,0 +1,4 @@
+search_date,company,role,jd_url,location_type,location_city,track,agent_score,status,decision_reason,resume_file,applied,notes
+2026-04-27,Freshworks,Senior Manager - Product Analytics IC,https://example.com/freshworks-product-analytics,Onsite,Bengaluru,A,9/10,Pursued,Very strong fit - location exception,Ashish_Product_Analytics_Freshworks.docx,No,"Strong fit on B2B SaaS product analytics, telemetry, experimentation, executive storytelling, analyst mentoring, and AI-assisted analytics workflows."
+2026-04-24,Northstar CRM,Product Analytics Lead,https://example.com/northstar-product-analytics,Remote,India,A,8/10,Monitoring,Needs verification,,No,"Promising product analytics role; verify reporting line, stack, and scope before building resume."
+2026-04-20,Legacy BI Co,Reporting Manager,https://example.com/legacy-bi-reporting,Hybrid,Hyderabad,A,5/10,Excluded,Below build threshold,,No,"Role is mostly static reporting and does not match product analytics growth goals."
