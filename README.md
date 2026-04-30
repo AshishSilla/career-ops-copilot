@@ -19,6 +19,8 @@ The goal was not to build a heavy SaaS app. The goal was to build a high-agency 
 - Sorts state files into a consistent order.
 - Keeps the workflow transparent by using plain CSV files instead of a hidden database.
 
+For the full lifecycle, see [docs/workflow.md](docs/workflow.md).
+
 ## Why This Shows AI Fluency
 
 This project reflects how I use AI in practical work: not as a replacement for judgment, but as a speed layer inside a controlled system.
@@ -34,8 +36,10 @@ career-ops-copilot/
   career_ops/
     cli.py
   data/
-    job_search_log.csv
-    application_tracker.csv
+    sample_job_search_log.csv
+    sample_application_tracker.csv
+  docs/
+    workflow.md
   README.md
   pyproject.toml
 ```
@@ -53,6 +57,22 @@ Or install locally in editable mode:
 ```bash
 python3 -m pip install -e .
 career-ops validate-state
+```
+
+By default, commands run against the bundled anonymized sample files:
+
+```text
+data/sample_job_search_log.csv
+data/sample_application_tracker.csv
+```
+
+To use your own CSV files, pass the file paths before the command:
+
+```bash
+career-ops \
+  --job-log path/to/job_search_log.csv \
+  --tracker path/to/application_tracker.csv \
+  validate-state
 ```
 
 ## Example Commands
@@ -107,11 +127,13 @@ career-ops mark-applied \
 
 I kept the storage layer as CSV because it is easy to audit, easy to edit manually, and works well with AI-assisted workflows. The CLI provides the guardrails that spreadsheets usually lack: required headers, controlled status values, date validation, duplicate detection, and lifecycle rules.
 
-I also separated `job_search_log.csv` from `application_tracker.csv` because the job-search funnel has two different modes: many roles are researched and rejected, while only a smaller set become active resume/application work.
+I also separated `sample_job_search_log.csv` from `sample_application_tracker.csv` because the job-search funnel has two different modes: many roles are researched and rejected, while only a smaller set become active resume/application work.
 
 ## Sample Data
 
 The repository includes anonymized sample rows only. The original private job-search data, personal resume files, application history, and company-specific notes are intentionally excluded.
+
+The sample files are intentionally named with the `sample_` prefix so they are clearly public demo data, not production state.
 
 ## Repository Description
 

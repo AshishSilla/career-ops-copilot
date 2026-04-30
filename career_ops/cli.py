@@ -1,19 +1,19 @@
 """Career operations CLI for a job-search tracker and application log.
 
 This script is the controlled state layer around:
-- data/job_search_log.csv
-- data/application_tracker.csv
+- data/sample_job_search_log.csv
+- data/sample_application_tracker.csv
 
 It keeps the visible CSV workflow intact while enforcing schemas, sorting,
 status transitions, and review/application bookkeeping.
 
 Examples:
-    python3 -B scripts/career_ops.py validate-state
-    python3 -B scripts/career_ops.py sort
-    python3 -B scripts/career_ops.py promote-role --company Sweed --role "Product Analytics Lead" --output-file Ashish_Gupta_Silla_Sweed_v1.docx --tier1 93 --tier2 86
-    python3 -B scripts/career_ops.py mark-review-needed --output-file Ashish_Gupta_Silla_Sweed_v1.docx
-    python3 -B scripts/career_ops.py mark-ready --output-file Ashish_Gupta_Silla_Sweed_v1.docx --review-status "Warning Accepted" --review-notes "Dense skills line accepted."
-    python3 -B scripts/career_ops.py mark-applied --output-file Ashish_Gupta_Silla_Sweed_v1.docx --applied-date 2026-04-27
+    python3 -B career_ops/cli.py validate-state
+    python3 -B career_ops/cli.py sort
+    python3 -B career_ops/cli.py promote-role --company "Northstar CRM" --role "Product Analytics Lead" --output-file Ashish_Product_Analytics_Northstar.docx --tier1 88 --tier2 81
+    python3 -B career_ops/cli.py mark-review-needed --output-file Ashish_Product_Analytics_Northstar.docx
+    python3 -B career_ops/cli.py mark-ready --output-file Ashish_Product_Analytics_Northstar.docx --review-status "Passed"
+    python3 -B career_ops/cli.py mark-applied --output-file Ashish_Product_Analytics_Northstar.docx --applied-date 2026-04-30
 """
 
 from __future__ import annotations
@@ -28,8 +28,10 @@ from pathlib import Path
 
 
 BASE = Path(__file__).resolve().parents[1]
-JOB_LOG = BASE / "data" / "job_search_log.csv"
-TRACKER = BASE / "data" / "application_tracker.csv"
+DEFAULT_JOB_LOG = BASE / "data" / "sample_job_search_log.csv"
+DEFAULT_TRACKER = BASE / "data" / "sample_application_tracker.csv"
+JOB_LOG = DEFAULT_JOB_LOG
+TRACKER = DEFAULT_TRACKER
 
 JOB_LOG_FIELDS = [
     "search_date",
@@ -105,6 +107,15 @@ def normalize(value: str | None) -> str:
 
 def today() -> str:
     return date.today().isoformat()
+
+
+def display_path(path: Path) -> Path:
+    if not path.is_absolute():
+        return path
+    try:
+        return path.relative_to(BASE)
+    except ValueError:
+        return path
 
 
 def parse_date(value: str, field: str, path: Path, findings: list[Finding], *, required: bool = False) -> None:
@@ -284,7 +295,7 @@ def sort_state(args: argparse.Namespace) -> int:
     job_rows.sort(key=lambda row: (row.get("search_date", ""), row.get("company", ""), row.get("role", "")))
     write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
     write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
-    print(f"Sorted {TRACKER.relative_to(BASE)} and {JOB_LOG.relative_to(BASE)}")
+    print(f"Sorted {display_path(TRACKER)} and {display_path(JOB_LOG)}")
     return 0
 
 
@@ -438,8 +449,7 @@ def print_findings(findings: list[Finding]) -> None:
         print("[PASS] career ops state is valid")
         return
     for finding in findings:
-        rel = finding.path.relative_to(BASE) if finding.path.is_absolute() else finding.path
-        print(f"{finding.severity}: {rel}: {finding.message}")
+        print(f"{finding.severity}: {display_path(finding.path)}: {finding.message}")
 
 
 def add_common_match_args(parser: argparse.ArgumentParser) -> None:
@@ -451,6 +461,18 @@ def add_common_match_args(parser: argparse.ArgumentParser) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--job-log",
+        type=Path,
+        default=DEFAULT_JOB_LOG,
+        help="Path to the job-search log CSV",
+    )
+    parser.add_argument(
+        "--tracker",
+        type=Path,
+        default=DEFAULT_TRACKER,
+        help="Path to the application tracker CSV",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate-state", help="Validate tracker/log schemas and lifecycle invariants")
@@ -495,7 +517,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global JOB_LOG, TRACKER
     args = parse_args()
+    JOB_LOG = args.job_log
+    TRACKER = args.tracker
     return args.func(args)
 
 
