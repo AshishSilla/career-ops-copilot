@@ -4,12 +4,6 @@ An AI-assisted career workflow control layer for managing job-search state, resu
 
 This project started as a real personal operating system for evaluating roles, generating tailored resumes, tracking review quality, and managing application follow-ups. I converted it into a public-safe sample project by removing private application history and replacing it with anonymized example data.
 
-## Inspiration and Attribution
-
-This project was inspired in part by the publicly available [santifer/career-ops](https://github.com/santifer/career-ops) project, an open-source AI-powered job search system that shows how agentic tools can support job evaluation, CV generation, batch processing, and pipeline tracking.
-
-Career Ops Copilot is an independent, smaller implementation focused on the control layer I wanted to demonstrate publicly: CSV-backed state, lifecycle validation, review gates, and auditable status transitions. The inspiration was the broader idea of treating career operations as a structured workflow; the implementation here is intentionally simplified, anonymized, and public-safe.
-
 ## What This Demonstrates
 
 - AI workflow design with human review gates instead of blind generation.
@@ -166,6 +160,12 @@ I also separated `sample_job_search_log.csv` from `sample_application_tracker.cs
 The repository includes anonymized sample rows only. The original private job-search data, personal resume files, application history, and company-specific notes are intentionally excluded.
 
 The sample files are intentionally named with the `sample_` prefix so they are clearly public demo data, not production state.
+
+## Inspiration and Attribution
+
+This project was inspired in part by the publicly available [santifer/career-ops](https://github.com/santifer/career-ops) project, an open-source AI-powered job search system that shows how agentic tools can support job evaluation, CV generation, batch processing, and pipeline tracking.
+
+Career Ops Copilot is an independent, smaller implementation focused on the control layer I wanted to demonstrate publicly: CSV-backed state, lifecycle validation, review gates, and auditable status transitions. The inspiration was the broader idea of treating career operations as a structured workflow; the implementation here is intentionally simplified, anonymized, and public-safe.
 
 ## Repository Description
 
