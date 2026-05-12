@@ -146,3 +146,29 @@ Suggested GitHub description:
 Suggested GitHub topics:
 
 `python`, `cli`, `csv`, `workflow-automation`, `job-search`, `ai-workflows`, `product-analytics`, `career-ops`
+
+## Change Log and Design Learnings
+
+### 2026-05-13: Added clearer review-gate positioning
+
+I refined the project documentation to make the core idea more explicit: AI can help draft, compare, and reason quickly, but the workflow still needs hard gates before anything is treated as final. The important learning was that "reviewed" cannot just mean a human or model looked at a draft. It needs a visible state transition, an accepted review status, and a file or artifact that can be traced back to the exact work being approved.
+
+This mirrors how I think about product analytics and analytics operations. A dashboard, report, or AI-generated recommendation is not reliable just because it exists. It becomes useful when definitions are clear, edge cases are handled, ownership is explicit, and the system prevents accidental skips in the workflow.
+
+### 2026-05-13: Clarified why CSV is intentional
+
+I kept the storage layer as plain CSV instead of moving immediately to a database because the goal of this project is auditability and control, not technical complexity. CSVs make every state change visible, easy to diff, and easy to inspect manually. The CLI adds the missing guardrails: schema validation, lifecycle checks, controlled statuses, duplicate detection, and review requirements.
+
+The learning here is that good automation does not always mean a heavier stack. For small operational systems, the right design is often a thin control layer over a simple source of truth.
+
+### 2026-05-13: Separated public-safe workflow from private source data
+
+The original workflow came from a real job-search operating system with private resumes, application history, and company-specific notes. I intentionally converted this repository into a public-safe version with anonymized sample files. That separation matters because the reusable value is the workflow pattern, not the private data.
+
+The product lesson is similar to analytics system design: separate the framework from the sensitive underlying records. The same validation, state management, and review-gate pattern can be reused without exposing confidential inputs.
+
+### 2026-05-13: Added the exact-artifact review principle
+
+One practical failure mode in AI-assisted workflows is reviewing the wrong artifact: an older file, a stale output, or a same-named document from a previous run. The fix is conceptual as much as technical: any review gate should point to the exact artifact produced by the current workflow run.
+
+That principle applies beyond resumes. In analytics and product work, a sign-off should connect to the exact dataset, query version, dashboard, experiment readout, or document being approved. Otherwise, the workflow can look controlled while still allowing stale evidence to pass through.
