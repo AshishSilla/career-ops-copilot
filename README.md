@@ -1,8 +1,15 @@
 # Career Ops Copilot
 
-A lightweight command-line copilot for managing an AI-assisted job search with structured state, review gates, and auditable CSV files.
+An AI-assisted career workflow control layer for managing job-search state, resume review gates, and application follow-ups with auditable CSV files.
 
 This project started as a real personal operating system for evaluating roles, generating tailored resumes, tracking review quality, and managing application follow-ups. I converted it into a public-safe sample project by removing private application history and replacing it with anonymized example data.
+
+## What This Demonstrates
+
+- AI workflow design with human review gates instead of blind generation.
+- Product analytics judgment around lifecycle states, source-of-truth rules, and exception handling.
+- Lightweight automation over transparent data rather than unnecessary platform complexity.
+- Practical operating discipline: schema validation, status transitions, duplicate checks, and follow-up tracking.
 
 ## Why I Built This
 
@@ -20,6 +27,14 @@ The goal was not to build a heavy SaaS app. The goal was to build a high-agency 
 - Keeps the workflow transparent by using plain CSV files instead of a hidden database.
 
 For the full lifecycle, see [docs/workflow.md](docs/workflow.md).
+
+## Workflow Model
+
+```text
+Researched -> Pursued -> Draft Built -> Review Needed -> Resume Ready -> Applied
+```
+
+The key design choice is that generated work cannot jump straight to completion. For example, a resume cannot be marked `Resume Ready` unless the review status is `Passed` or `Warning Accepted`. That forces the workflow to record quality judgment before an application is treated as ready.
 
 ## Why This Shows AI Fluency
 
@@ -83,6 +98,15 @@ Validate the current state:
 career-ops validate-state
 ```
 
+Example output:
+
+```text
+[PASS] career ops state is valid
+Job log rows: 3
+Tracker rows: 1
+Summary: 0 error(s), 0 warning(s)
+```
+
 Sort the CSV files into canonical order:
 
 ```bash
@@ -122,6 +146,8 @@ career-ops mark-applied \
   --output-file "Ashish_Product_Analytics_Northstar.docx" \
   --applied-date 2026-04-30
 ```
+
+Together, these commands show the intended operating loop: validate state, promote a role, move the resume into review, mark it ready only after review, then mark the application submitted.
 
 ## Design Choices
 
