@@ -419,13 +419,16 @@ def enforce_ready_queue_packet(company: str, role: str, output_file: str, *, leg
     ready_matches = [
         packet
         for packet in matches
-        if packet.get("status") == "ready" and packet.get("build", {}).get("output_file") == output_file
+        if packet.get("status") == "ready"
+        and packet.get("build", {}).get("output_file") == output_file
+        and normalize(packet.get("company")) == normalize(company)
+        and normalize(packet.get("role")) == normalize(role)
     ]
     if not ready_matches:
         statuses = ", ".join(f"{packet.get('role_id')}={packet.get('status')}" for packet in matches)
         raise SystemExit(
-            "Tracker update is blocked because matching queue packet(s) are not ready "
-            f"for {output_file!r}: {statuses}"
+            "Tracker update is blocked because no ready queue packet matches company, role, and output file "
+            f"for {company} - {role} / {output_file!r}: {statuses}"
         )
 
 
@@ -482,6 +485,14 @@ def validate_queue(packets: list[dict]) -> list[Finding]:
                 findings.append(Finding("ERROR", path, f"{role_id_value}: ready requires final_critic Passed/Warning Accepted"))
             if "Warning Accepted" in {build.get("mechanical_qa"), build.get("final_critic")} and not build.get("notes"):
                 findings.append(Finding("ERROR", path, f"{role_id_value}: accepted QA/critic warnings require notes"))
+        if status == "archived":
+            archive = packet.get("archive", {})
+            if not archive.get("archived_at"):
+                findings.append(Finding("ERROR", path, f"{role_id_value}: archived requires archive.archived_at"))
+            else:
+                parse_date(archive.get("archived_at", ""), "archive.archived_at", path, findings, required=True)
+            if not archive.get("reason"):
+                findings.append(Finding("ERROR", path, f"{role_id_value}: archived requires archive.reason"))
         if status == "failed":
             if not failure:
                 findings.append(Finding("ERROR", path, f"{role_id_value}: failed packet requires failure metadata"))

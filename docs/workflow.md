@@ -108,8 +108,8 @@ The command updates both CSV files and creates a default follow-up date.
 The queue layer models the resume architecture directly:
 
 ```text
-pending_gate -> master_recommended -> feedback captured -> archived
-pending_gate -> gate_checked -> proposed -> approved -> building -> ready -> feedback captured
+pending_gate -> master_recommended -> queue-feedback event -> archived
+pending_gate -> gate_checked -> proposed -> approved -> building -> ready -> queue-feedback event
                        ^             ^          ^            |
                        |             |          |            |
                        +-------------+----------+------------+
