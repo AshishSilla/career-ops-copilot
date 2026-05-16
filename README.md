@@ -36,6 +36,92 @@ Researched -> Pursued -> Draft Built -> Review Needed -> Resume Ready -> Applied
 
 The key design choice is that generated work cannot jump straight to completion. For example, a resume cannot be marked `Resume Ready` unless the review status is `Passed` or `Warning Accepted`. That forces the workflow to record quality judgment before an application is treated as ready.
 
+## Resume Workflow Architecture
+
+The resume workflow is designed as a gated system, not a one-shot generation task. The agent first decides whether customization is even justified, then maps the job description to source-backed achievements, asks for approval, builds the resume, and runs a final critic pass before the artifact is treated as ready.
+
+```text
+USER REQUEST
+  "Create resume for this role"
+        |
+        v
+[1] JD Ingest
+    - Parse role, company, location, seniority, tools, domain, must-haves
+        |
+        v
+[2] Master Resume Check
+    - Compare the JD against the relevant master resume
+    - Score requirement intensity from 1-10
+    - Decide whether the master is sufficient
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+[3A] Master Sufficient          [3B] Customization Candidate
+    - Stop                         - Scan achievement bank
+    - Recommend master as-is        - Compare master bullets vs stronger evidence
+    - Ask before tailoring          - Identify swaps, gaps, and risks
+        |                             |
+        |                             v
+        |                         [4] Evidence Map
+        |                             - JD requirement -> candidate bullets
+        |                             - Selected evidence -> rationale
+        |                             - Rejected/watchlist bullets
+        |                             - Summary and skills changes
+        |                             |
+        |                             v
+        |                         [5] Human Approval Gate
+        |                             - Approve, edit, or reject the proposed mapping
+        |                             |
+        |                             v
+        |                         [6] Build Resume
+        |                             - Generate config and DOCX
+        |                             - Preserve honest gaps and claims to avoid
+        |                             |
+        |                             v
+        |                         [7] Mechanical QA
+        |                             - Config validation
+        |                             - Preflight review
+        |                             - Generated resume review
+        |                             - DOCX integrity
+        |                             |
+        |                             v
+        |                         [8] Final Critic Review
+        |                             - Does it answer the real JD?
+        |                             - Is the strongest proof above the fold?
+        |                             - Are unsupported tools absent?
+        |                             - Is it better than the master as-is?
+        |                             |
+        |                             v
+        |                         [9] Tracker State
+        |                             - Review Needed / Resume Ready / Applied
+```
+
+The key product decision is the separation between **generation** and **approval**. AI can draft and compare quickly, but the workflow forces evidence mapping, explicit approval, mechanical validation, and a final critic review before a resume moves forward.
+
+In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate and the achievement-bank scan. That makes the review process auditable instead of relying on the agent to remember the right sequence.
+
+## Evidence-Mapping Pattern
+
+The customization step uses a simple evidence matrix rather than keyword stuffing:
+
+```text
+JD requirement:
+  "Develop datasets, data systems, and simple pipelines"
+
+Achievement-bank candidates:
+  HR_24 -> reporting modernization with validated staging layers
+  HR_18 -> analytics migration QA across production queries
+  BW_14 -> SQL dimensional model / source of truth
+  RZ_02 -> checkout data normalization
+
+Decision:
+  Use HR_24 and BW_14 as primary evidence.
+  Use HR_18 only if migration or pipeline support is central to the JD.
+```
+
+This keeps the workflow grounded in verified achievements. It also creates a visible audit trail for why a bullet was selected, why another was rejected, and which claims should not appear in the resume.
+
 ## Why This Shows AI Fluency
 
 This project reflects how I use AI in practical work: not as a replacement for judgment, but as a speed layer inside a controlled system.
