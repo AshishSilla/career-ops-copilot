@@ -109,7 +109,7 @@ USER REQUEST
                v
  +-------------+---------------+
  | [8] Final Critic Review     |
- | - Answers the real JD?      |
+ | - Answers JD/config mapping?|
  | - Strongest proof visible?  |
  | - Unsupported tools absent? |
  | - Better than master as-is? |
@@ -135,7 +135,20 @@ The key product decision is the separation between **generation** and **approval
 
 Failures are expected to loop backward, not move forward with caveats. Mechanical QA failures go back to the build/config layer. Final critic failures go back to the evidence map or resume strategy layer, because the issue is usually strategic rather than formatting-related. A resume reaches tracker state only after both loops are clean.
 
-In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate and the achievement-bank scan. That makes the review process auditable instead of relying on the agent to remember the right sequence.
+In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate, the achievement-bank scan, the master-vs-tailored comparison, and confirmation that user approval happened after the evidence map was presented. That makes the review process auditable instead of relying on the agent to remember the right sequence.
+
+The private workflow also has a small pre-build command that prints the gate decision before any files are written. That keeps the first decision separate from generation:
+
+```bash
+python3 -B scripts/resume_gate_check.py \
+  --company "ExampleCo" \
+  --role "Analytics Manager" \
+  --track A \
+  --requirement-intensity 8 \
+  --gate-decision customization_needed \
+  --reason "The JD has specialized BI, data-quality, and stakeholder-mapping requirements beyond the master resume." \
+  --next-action "Run achievement-bank evidence mapping and ask Ashish to approve the proposed swaps."
+```
 
 ## Evidence-Mapping Pattern
 
