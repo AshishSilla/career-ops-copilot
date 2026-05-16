@@ -128,12 +128,33 @@ USER REQUEST
  +-------------+---------------+
                |
                v
-            COMPLETE
+ +-------------+---------------+
+ | [10] Feedback Capture       |
+ | - User edits or approval    |
+ | - Rejected bullets/summary  |
+ | - Accepted warnings         |
+ | - Applied resume signal     |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [11] Learning Memory        |
+ | - Feedback log              |
+ | - Quality rules             |
+ | - Usage matrix              |
+ | - Bullet matching memory    |
+ | - Review trail              |
+ +-------------+---------------+
+               |
+               | Feeds future evidence selection
+               +-----------------------> back to [4]
 ```
 
 The key product decision is the separation between **generation** and **approval**. AI can draft and compare quickly, but the workflow forces evidence mapping, explicit approval, mechanical validation, and a final critic review before a resume moves forward.
 
 Failures are expected to loop backward, not move forward with caveats. Mechanical QA failures go back to the build/config layer. Final critic failures go back to the evidence map or resume strategy layer, because the issue is usually strategic rather than formatting-related. A resume reaches tracker state only after both loops are clean.
+
+The feedback loop is different from the QA loop. QA and critic loops fix the current resume; feedback capture improves future resumes. It is triggered after review, approval, rejection, accepted warnings, manual edits, or application. Those signals update the feedback log, quality rules, usage matrix, bullet matching memory, and review trail so the next evidence map starts with stronger preferences.
 
 In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate, the achievement-bank scan, the master-vs-tailored comparison, and confirmation that user approval happened after the evidence map was presented. That makes the review process auditable instead of relying on the agent to remember the right sequence.
 
