@@ -102,6 +102,10 @@ USER REQUEST
  | - DOCX integrity            |
  +-------------+---------------+
                |
+               | If QA fails:
+               | fix config, bullets, summary, or formatting
+               | and rebuild from [6]
+               |
                v
  +-------------+---------------+
  | [8] Final Critic Review     |
@@ -110,6 +114,10 @@ USER REQUEST
  | - Unsupported tools absent? |
  | - Better than master as-is? |
  +-------------+---------------+
+               |
+               | If critic fails:
+               | return to [4] Evidence Map or [6] Build Resume,
+               | revise the strategy, and run QA again
                |
                v
  +-------------+---------------+
@@ -124,6 +132,8 @@ USER REQUEST
 ```
 
 The key product decision is the separation between **generation** and **approval**. AI can draft and compare quickly, but the workflow forces evidence mapping, explicit approval, mechanical validation, and a final critic review before a resume moves forward.
+
+Failures are expected to loop backward, not move forward with caveats. Mechanical QA failures go back to the build/config layer. Final critic failures go back to the evidence map or resume strategy layer, because the issue is usually strategic rather than formatting-related. A resume reaches tracker state only after both loops are clean.
 
 In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate and the achievement-bank scan. That makes the review process auditable instead of relying on the agent to remember the right sequence.
 
