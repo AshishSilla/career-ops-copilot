@@ -10,7 +10,7 @@ status transitions, and review/application bookkeeping.
 Examples:
     python3 -B career_ops/cli.py validate-state
     python3 -B career_ops/cli.py sort
-    python3 -B career_ops/cli.py promote-role --company "Northstar CRM" --role "Product Analytics Lead" --output-file Ashish_Product_Analytics_Northstar.docx --tier1 88 --tier2 81
+    python3 -B career_ops/cli.py promote-role --company "Northstar CRM" --role "Product Analytics Lead" --output-file Ashish_Product_Analytics_Northstar.docx --tier1 88 --tier2 81 --legacy-no-queue
     python3 -B career_ops/cli.py mark-review-needed --output-file Ashish_Product_Analytics_Northstar.docx
     python3 -B career_ops/cli.py mark-ready --output-file Ashish_Product_Analytics_Northstar.docx --review-status "Passed"
     python3 -B career_ops/cli.py mark-applied --output-file Ashish_Product_Analytics_Northstar.docx --applied-date 2026-04-30
@@ -112,6 +112,7 @@ QUEUE_STATUSES = {
     "building",
     "ready",
     "failed",
+    "archived",
 }
 GATE_DECISIONS = {"use_master_as_is", "customization_needed"}
 BUILD_STAGES = {"mechanical_qa", "final_critic", "docx_build", "state_update"}
@@ -152,6 +153,19 @@ def ensure_queue_dir() -> None:
 
 
 @contextmanager
+def state_lock():
+    lock_path = BASE / ".career_ops_state.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
 def queue_lock():
     ensure_queue_dir()
     lock_path = RESUME_QUEUE / ".queue.lock"
@@ -169,7 +183,10 @@ def load_packet(role_id_value: str) -> dict:
     path = queue_path(role_id_value)
     if not path.exists():
         raise SystemExit(f"No queue packet found for role_id {role_id_value!r}")
-    packet = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        packet = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Queue packet {display_path(path)} is not valid JSON: {exc}") from exc
     packet["_path"] = path
     return packet
 
@@ -185,11 +202,22 @@ def write_packet(packet: dict) -> None:
     os.replace(tmp_path, path)
 
 
+def append_feedback_log(feedback_row: dict) -> None:
+    ensure_queue_dir()
+    path = RESUME_QUEUE / ".feedback_log.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(feedback_row, sort_keys=True) + "\n")
+
+
 def queue_packets() -> list[dict]:
     ensure_queue_dir()
     packets: list[dict] = []
     for path in sorted(RESUME_QUEUE.glob("*.json")):
-        packet = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            packet = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            packets.append({"_path": path, "_invalid_json": str(exc)})
+            continue
         packet["_path"] = path
         packets.append(packet)
     return packets
@@ -261,10 +289,13 @@ def read_csv(path: Path, expected_fields: list[str]) -> tuple[list[dict[str, str
 
 
 def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None:
-    with path.open("w", newline="") as handle:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=path.parent, delete=False) as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows([{field: row.get(field, "") for field in fields} for row in rows])
+        tmp_path = Path(handle.name)
+    os.replace(tmp_path, path)
 
 
 def validate_job_log(rows: list[dict[str, str]]) -> list[Finding]:
@@ -365,6 +396,8 @@ def validate_tracker(rows: list[dict[str, str]], job_rows: list[dict[str, str]])
 def matching_queue_packets(company: str, role: str, output_file: str = "") -> list[dict]:
     matches: list[dict] = []
     for packet in queue_packets():
+        if packet.get("_invalid_json"):
+            continue
         output_matches = output_file and packet.get("build", {}).get("output_file") == output_file
         role_matches = normalize(packet.get("company")) == normalize(company) and normalize(packet.get("role")) == normalize(role)
         if output_matches or role_matches:
@@ -372,9 +405,16 @@ def matching_queue_packets(company: str, role: str, output_file: str = "") -> li
     return matches
 
 
-def enforce_ready_queue_packet(company: str, role: str, output_file: str) -> None:
+def enforce_ready_queue_packet(company: str, role: str, output_file: str, *, legacy_no_queue: bool = False) -> None:
     matches = matching_queue_packets(company, role, output_file)
     if not matches:
+        if legacy_no_queue:
+            return
+        raise SystemExit(
+            "Tracker update is blocked because no matching ready queue packet exists. "
+            "Run the queue workflow first, or pass --legacy-no-queue for an older/manual artifact."
+        )
+    if legacy_no_queue:
         return
     ready_matches = [
         packet
@@ -399,6 +439,9 @@ def validate_queue(packets: list[dict]) -> list[Finding]:
     seen_role_ids: set[str] = set()
     for packet in packets:
         path = packet.get("_path", RESUME_QUEUE)
+        if packet.get("_invalid_json"):
+            findings.append(Finding("ERROR", path, f"invalid queue JSON: {packet['_invalid_json']}"))
+            continue
         role_id_value = packet.get("role_id", "")
         status = packet.get("status", "")
         if not role_id_value:
@@ -499,14 +542,15 @@ def validate_queue_command(args: argparse.Namespace) -> int:
 
 
 def sort_state(args: argparse.Namespace) -> int:
-    job_rows, tracker_rows, findings = load_state()
-    if any(finding.severity == "ERROR" for finding in findings):
-        print_findings(findings)
-        return 1
-    tracker_rows.sort(key=lambda row: (row.get("date", ""), row.get("company", ""), row.get("role", "")), reverse=True)
-    job_rows.sort(key=lambda row: (row.get("search_date", ""), row.get("company", ""), row.get("role", "")))
-    write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
-    write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
+    with state_lock():
+        job_rows, tracker_rows, findings = load_state()
+        if any(finding.severity == "ERROR" for finding in findings):
+            print_findings(findings)
+            return 1
+        tracker_rows.sort(key=lambda row: (row.get("date", ""), row.get("company", ""), row.get("role", "")), reverse=True)
+        job_rows.sort(key=lambda row: (row.get("search_date", ""), row.get("company", ""), row.get("role", "")))
+        write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
+        write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
     print(f"Sorted {display_path(TRACKER)} and {display_path(JOB_LOG)}")
     return 0
 
@@ -544,116 +588,134 @@ def find_job_row(rows: list[dict[str, str]], company: str, role: str) -> dict[st
 
 
 def promote_role(args: argparse.Namespace) -> int:
-    job_rows, tracker_rows, findings = load_state()
-    if any(finding.severity == "ERROR" for finding in findings):
-        print_findings(findings)
-        return 1
-    job_row = find_job_row(job_rows, args.company, args.role)
-    if job_row.get("status") not in {"Pursued", "Monitoring"}:
-        raise SystemExit(f"Job log status is {job_row.get('status')!r}; only Pursued/Monitoring roles can be promoted")
-    if any(row.get("output_file") == args.output_file for row in tracker_rows):
-        raise SystemExit(f"Tracker already has output_file {args.output_file!r}")
-    enforce_ready_queue_packet(job_row.get("company", ""), job_row.get("role", ""), args.output_file)
+    with state_lock():
+        job_rows, tracker_rows, findings = load_state()
+        if any(finding.severity == "ERROR" for finding in findings):
+            print_findings(findings)
+            return 1
+        job_row = find_job_row(job_rows, args.company, args.role)
+        if job_row.get("status") not in {"Pursued", "Monitoring"}:
+            raise SystemExit(f"Job log status is {job_row.get('status')!r}; only Pursued/Monitoring roles can be promoted")
+        if any(row.get("output_file") == args.output_file for row in tracker_rows):
+            raise SystemExit(f"Tracker already has output_file {args.output_file!r}")
+        enforce_ready_queue_packet(
+            job_row.get("company", ""),
+            job_row.get("role", ""),
+            args.output_file,
+            legacy_no_queue=args.legacy_no_queue,
+        )
 
-    tracker_rows.append(
-        {
-            "date": args.date or today(),
-            "company": job_row.get("company", ""),
-            "role": job_row.get("role", ""),
-            "track": job_row.get("track", ""),
-            "fitment_score": normalize_score(job_row.get("agent_score")),
-            "location_type": job_row.get("location_type", ""),
-            "location_exception": args.location_exception,
-            "output_file": args.output_file,
-            "tier1_coverage_pct": str(args.tier1),
-            "tier2_coverage_pct": str(args.tier2),
-            "applied": "No",
-            "status": "Draft Built",
-            "review_status": "",
-            "last_reviewed_at": "",
-            "review_notes": "",
-            "notes": job_row.get("notes", ""),
-            "application_deadline": args.application_deadline or "",
-            "follow_up_due": "",
-            "follow_up_count": "0",
-            "last_follow_up_date": "",
-            "job_url": job_row.get("jd_url", ""),
-        }
-    )
-    job_row["resume_file"] = args.output_file
-    if job_row.get("status") == "Monitoring":
-        job_row["status"] = "Pursued"
-    tracker_rows.sort(key=lambda row: (row.get("date", ""), row.get("company", ""), row.get("role", "")), reverse=True)
-    write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
-    write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
+        tracker_rows.append(
+            {
+                "date": args.date or today(),
+                "company": job_row.get("company", ""),
+                "role": job_row.get("role", ""),
+                "track": job_row.get("track", ""),
+                "fitment_score": normalize_score(job_row.get("agent_score")),
+                "location_type": job_row.get("location_type", ""),
+                "location_exception": args.location_exception,
+                "output_file": args.output_file,
+                "tier1_coverage_pct": str(args.tier1),
+                "tier2_coverage_pct": str(args.tier2),
+                "applied": "No",
+                "status": "Draft Built",
+                "review_status": "",
+                "last_reviewed_at": "",
+                "review_notes": "",
+                "notes": job_row.get("notes", ""),
+                "application_deadline": args.application_deadline or "",
+                "follow_up_due": "",
+                "follow_up_count": "0",
+                "last_follow_up_date": "",
+                "job_url": job_row.get("jd_url", ""),
+            }
+        )
+        job_row["resume_file"] = args.output_file
+        if args.legacy_no_queue:
+            job_row["decision_reason"] = "Built before strict gate"
+        if job_row.get("status") == "Monitoring":
+            job_row["status"] = "Pursued"
+        tracker_rows.sort(key=lambda row: (row.get("date", ""), row.get("company", ""), row.get("role", "")), reverse=True)
+        write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
+        write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
     print(f"Promoted {job_row.get('company')} - {job_row.get('role')} to Draft Built")
     return 0
 
 
 def mark_review_needed(args: argparse.Namespace) -> int:
-    _, tracker_rows, findings = load_state()
-    if any(finding.severity == "ERROR" for finding in findings):
-        print_findings(findings)
-        return 1
-    row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
-    if row.get("status") not in {"Draft Built", "Review Needed"}:
-        raise SystemExit(f"Cannot mark review needed from status {row.get('status')!r}")
-    row["status"] = "Review Needed"
-    row["review_status"] = "Pending"
-    write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
+    with state_lock():
+        _, tracker_rows, findings = load_state()
+        if any(finding.severity == "ERROR" for finding in findings):
+            print_findings(findings)
+            return 1
+        row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
+        if row.get("status") not in {"Draft Built", "Review Needed"}:
+            raise SystemExit(f"Cannot mark review needed from status {row.get('status')!r}")
+        row["status"] = "Review Needed"
+        row["review_status"] = "Pending"
+        write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
     print(f"Marked Review Needed: {row.get('company')} - {row.get('role')}")
     return 0
 
 
 def mark_ready(args: argparse.Namespace) -> int:
-    _, tracker_rows, findings = load_state()
-    if any(finding.severity == "ERROR" for finding in findings):
-        print_findings(findings)
-        return 1
-    if args.review_status not in {"Passed", "Warning Accepted"}:
-        raise SystemExit("--review-status must be Passed or Warning Accepted")
-    if args.review_status == "Warning Accepted" and not args.review_notes:
-        raise SystemExit("--review-notes is required when accepting warnings")
-    row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
-    if row.get("status") not in {"Draft Built", "Review Needed", "Resume Ready"}:
-        raise SystemExit(f"Cannot mark ready from status {row.get('status')!r}")
-    enforce_ready_queue_packet(row.get("company", ""), row.get("role", ""), row.get("output_file", ""))
-    row["status"] = "Resume Ready"
-    row["review_status"] = args.review_status
-    row["last_reviewed_at"] = args.reviewed_at or today()
-    row["review_notes"] = args.review_notes or "Validation and whole-resume review passed."
-    write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
+    with state_lock():
+        _, tracker_rows, findings = load_state()
+        if any(finding.severity == "ERROR" for finding in findings):
+            print_findings(findings)
+            return 1
+        if args.review_status not in {"Passed", "Warning Accepted"}:
+            raise SystemExit("--review-status must be Passed or Warning Accepted")
+        if args.review_status == "Warning Accepted" and not args.review_notes:
+            raise SystemExit("--review-notes is required when accepting warnings")
+        row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
+        if row.get("status") not in {"Draft Built", "Review Needed", "Resume Ready"}:
+            raise SystemExit(f"Cannot mark ready from status {row.get('status')!r}")
+        enforce_ready_queue_packet(
+            row.get("company", ""),
+            row.get("role", ""),
+            row.get("output_file", ""),
+            legacy_no_queue=args.legacy_no_queue,
+        )
+        row["status"] = "Resume Ready"
+        row["review_status"] = args.review_status
+        row["last_reviewed_at"] = args.reviewed_at or today()
+        row["review_notes"] = args.review_notes or "Validation and whole-resume review passed."
+        if args.legacy_no_queue:
+            row["notes"] = (row.get("notes", "") + " Legacy no-queue readiness override.").strip()
+        write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
     print(f"Marked Resume Ready: {row.get('company')} - {row.get('role')}")
     return 0
 
 
 def mark_applied(args: argparse.Namespace) -> int:
-    job_rows, tracker_rows, findings = load_state()
-    if any(finding.severity == "ERROR" for finding in findings):
-        print_findings(findings)
-        return 1
-    row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
-    if row.get("status") not in {"Resume Ready", "Applied"}:
-        raise SystemExit(f"Cannot mark applied from status {row.get('status')!r}; mark Resume Ready first")
-    applied_date = args.applied_date or today()
-    parse_check: list[Finding] = []
-    parse_date(applied_date, "applied_date", TRACKER, parse_check, required=True)
-    if parse_check:
-        print_findings(parse_check)
-        return 1
-    due_date = datetime.strptime(applied_date, "%Y-%m-%d").date() + timedelta(days=args.follow_up_days)
-    row["date"] = applied_date
-    row["applied"] = "Yes"
-    row["status"] = "Applied"
-    row["follow_up_due"] = due_date.isoformat()
-    row["follow_up_count"] = row.get("follow_up_count") or "0"
-    for job_row in job_rows:
-        if job_row.get("resume_file") == row.get("output_file"):
-            job_row["applied"] = "Yes"
-            job_row["status"] = "Applied"
-    tracker_rows.sort(key=lambda item: (item.get("date", ""), item.get("company", ""), item.get("role", "")), reverse=True)
-    write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
-    write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
+    with state_lock():
+        job_rows, tracker_rows, findings = load_state()
+        if any(finding.severity == "ERROR" for finding in findings):
+            print_findings(findings)
+            return 1
+        row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
+        if row.get("status") not in {"Resume Ready", "Applied"}:
+            raise SystemExit(f"Cannot mark applied from status {row.get('status')!r}; mark Resume Ready first")
+        applied_date = args.applied_date or today()
+        parse_check: list[Finding] = []
+        parse_date(applied_date, "applied_date", TRACKER, parse_check, required=True)
+        if parse_check:
+            print_findings(parse_check)
+            return 1
+        due_date = datetime.strptime(applied_date, "%Y-%m-%d").date() + timedelta(days=args.follow_up_days)
+        row["date"] = applied_date
+        row["applied"] = "Yes"
+        row["status"] = "Applied"
+        row["follow_up_due"] = due_date.isoformat()
+        row["follow_up_count"] = row.get("follow_up_count") or "0"
+        for job_row in job_rows:
+            if job_row.get("resume_file") == row.get("output_file"):
+                job_row["applied"] = "Yes"
+                job_row["status"] = "Applied"
+        tracker_rows.sort(key=lambda item: (item.get("date", ""), item.get("company", ""), item.get("role", "")), reverse=True)
+        write_csv(TRACKER, TRACKER_FIELDS, tracker_rows)
+        write_csv(JOB_LOG, JOB_LOG_FIELDS, job_rows)
     print(f"Marked Applied: {row.get('company')} - {row.get('role')} (follow-up due {row['follow_up_due']})")
     return 0
 
@@ -899,7 +961,7 @@ def queue_retry(args: argparse.Namespace) -> int:
 def queue_feedback(args: argparse.Namespace) -> int:
     with queue_lock():
         packet = load_packet(args.role_id)
-        assert_status(packet, {"master_recommended", "ready", "failed"})
+        assert_status(packet, {"master_recommended", "approved", "ready", "failed", "archived"})
         if len(args.note.split()) < 6:
             raise SystemExit("--note must capture the feedback signal with at least 6 words")
         feedback = {
@@ -923,7 +985,39 @@ def queue_feedback(args: argparse.Namespace) -> int:
         )
         packet.setdefault("history", []).append({"date": today(), "event": "feedback_captured", "note": args.note})
         write_packet(packet)
+        append_feedback_log(
+            {
+                "role_id": args.role_id,
+                "company": packet.get("company", ""),
+                "role": packet.get("role", ""),
+                "captured_at": feedback["captured_at"],
+                "signal_type": args.signal_type,
+                "note": args.note,
+            }
+        )
     print(f"Feedback captured for {args.role_id}; future evidence maps should use this signal.")
+    return 0
+
+
+def queue_archive(args: argparse.Namespace) -> int:
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"master_recommended", "ready", "failed", "archived"})
+        if len(args.reason.split()) < 6:
+            raise SystemExit("--reason must explain why this packet is being archived")
+        packet["status"] = "archived"
+        if packet.get("failure"):
+            packet.setdefault("failure_history", []).append(packet["failure"])
+            packet.pop("failure", None)
+        packet.setdefault("archive", {}).update(
+            {
+                "archived_at": args.archived_at or today(),
+                "reason": args.reason,
+            }
+        )
+        packet.setdefault("history", []).append({"date": today(), "event": "archived", "note": args.reason})
+        write_packet(packet)
+    print(f"Archived queue packet: {args.role_id}")
     return 0
 
 
@@ -935,6 +1029,9 @@ def queue_status(args: argparse.Namespace) -> int:
         print("No queue packets found.")
         return 0
     for packet in packets:
+        if packet.get("_invalid_json"):
+            print(f"{display_path(packet.get('_path', RESUME_QUEUE))} | invalid_json | {packet.get('_invalid_json')}")
+            continue
         print(
             f"{packet.get('role_id')} | {packet.get('status')} | "
             f"{packet.get('company')} - {packet.get('role')} | updated {packet.get('updated_at')}"
@@ -1002,6 +1099,11 @@ def parse_args() -> argparse.Namespace:
     promote.add_argument("--date")
     promote.add_argument("--location-exception", choices=["", "Yes", "No"], default="No")
     promote.add_argument("--application-deadline")
+    promote.add_argument(
+        "--legacy-no-queue",
+        action="store_true",
+        help="Bypass the ready queue-packet requirement for older/manual artifacts",
+    )
     promote.set_defaults(func=promote_role)
 
     review_needed = subparsers.add_parser("mark-review-needed", help="Move a tracker row to Review Needed")
@@ -1013,6 +1115,11 @@ def parse_args() -> argparse.Namespace:
     ready.add_argument("--review-status", required=True, choices=["Passed", "Warning Accepted"])
     ready.add_argument("--review-notes", default="")
     ready.add_argument("--reviewed-at")
+    ready.add_argument(
+        "--legacy-no-queue",
+        action="store_true",
+        help="Bypass the ready queue-packet requirement for older/manual artifacts",
+    )
     ready.set_defaults(func=mark_ready)
 
     applied = subparsers.add_parser("mark-applied", help="Mark tracker and job log rows as applied")
@@ -1103,6 +1210,12 @@ def parse_args() -> argparse.Namespace:
     queue_feedback_parser.add_argument("--applied-signal", default="")
     queue_feedback_parser.add_argument("--captured-at")
     queue_feedback_parser.set_defaults(func=queue_feedback)
+
+    queue_archive_parser = subparsers.add_parser("queue-archive", help="Archive a terminal queue packet")
+    queue_archive_parser.add_argument("--role-id", required=True)
+    queue_archive_parser.add_argument("--reason", required=True)
+    queue_archive_parser.add_argument("--archived-at")
+    queue_archive_parser.set_defaults(func=queue_archive)
 
     queue_status_parser = subparsers.add_parser("queue-status", help="List resume orchestration queue packets")
     queue_status_parser.add_argument("--role-id")

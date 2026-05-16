@@ -70,7 +70,7 @@ flowchart TD
     L -->|Passes| M[9. Tracker state<br/>Review Needed<br/>Resume Ready<br/>Applied]
 
     M --> N[10. Feedback capture<br/>User edits or approval<br/>Rejected bullets/summary<br/>Accepted warnings<br/>Applied resume signal]
-    N --> O[11. Learning memory<br/>Feedback log<br/>Quality rules<br/>Usage matrix<br/>Bullet matching memory<br/>Review trail]
+    N --> O[11. Learning memory<br/>Packet-local learning<br/>Queue feedback log<br/>Review trail]
     O -->|queue-feedback feeds future evidence selection| H
     O --> P[Complete<br/>Workflow state updated]
 ```
@@ -79,7 +79,7 @@ The key product decision is the separation between **generation** and **approval
 
 Failures are expected to loop backward, not move forward with caveats. Mechanical QA failures are recorded with `queue-fail --retry-target build_resume`, then reopened with `queue-retry` before another build can start. Final critic failures use either `--retry-target evidence_map` for strategy issues or `--retry-target build_resume` for content/build issues. A failed packet cannot jump straight back into `building`; the retry target must be opened and repaired first.
 
-The feedback loop is different from the QA loop. QA and critic loops fix the current resume; feedback capture improves future resumes. It is triggered after review, approval, rejection, accepted warnings, manual edits, or application. Those signals are captured with `queue-feedback`, updating the feedback log, learning memory, usage matrix, bullet matching memory, and review trail so the next evidence map starts with stronger preferences.
+The feedback loop is different from the QA loop. QA and critic loops fix the current resume; feedback capture improves future resumes. It is triggered after review, approval, rejection, accepted warnings, manual edits, or application. Those signals are captured with `queue-feedback`, updating packet-local learning memory, a queue-level feedback log, and the packet review trail so the next evidence map starts with stronger preferences.
 
 In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate, the achievement-bank scan, the master-vs-tailored comparison, and confirmation that user approval happened after the evidence map was presented. That makes the review process auditable instead of relying on the agent to remember the right sequence.
 
@@ -204,7 +204,8 @@ career-ops promote-role \
   --role "Product Analytics Lead" \
   --output-file "Ashish_Product_Analytics_Northstar.docx" \
   --tier1 88 \
-  --tier2 81
+  --tier2 81 \
+  --legacy-no-queue
 ```
 
 Mark a resume as needing review:
@@ -219,7 +220,8 @@ Mark a resume as ready after review:
 ```bash
 career-ops mark-ready \
   --output-file "Ashish_Product_Analytics_Northstar.docx" \
-  --review-status "Passed"
+  --review-status "Passed" \
+  --legacy-no-queue
 ```
 
 Mark an application as submitted and create a follow-up date:
@@ -230,7 +232,7 @@ career-ops mark-applied \
   --applied-date 2026-04-30
 ```
 
-Together, these commands show the intended operating loop: validate state, promote a role, move the resume into review, mark it ready only after review, then mark the application submitted.
+Together, these commands show the legacy/sample operating loop: validate state, promote a role, move the resume into review, mark it ready only after review, then mark the application submitted. New resume builds should normally come from a `ready` queue packet; `--legacy-no-queue` is only for older/manual artifacts or the bundled sample flow.
 
 ## Resume Queue Commands
 
@@ -306,6 +308,10 @@ career-ops queue-feedback \
   --role-id "northstar-crm__product-analytics-lead" \
   --signal-type accepted_warning \
   --note "Accepted a minor summary tradeoff because the role-specific evidence stayed stronger."
+
+career-ops queue-archive \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --reason "Master resume was recommended and no tailored artifact was needed."
 ```
 
 View queue state:
@@ -315,7 +321,7 @@ career-ops queue-status
 career-ops validate-queue
 ```
 
-Queue writes are lock-protected and packet files are written atomically. The sample queue ignores generated JSON files in Git so private JD mappings, approval notes, and feedback signals are not accidentally committed. For real usage, keep queue packets outside this public repo and pass `--resume-queue`.
+Queue writes are lock-protected and packet files are written atomically. Tracker/log CSV writes are also protected with a state lock and atomic replacement. The sample queue ignores generated JSON files and queue feedback logs in Git so private JD mappings, approval notes, and feedback signals are not accidentally committed. For real usage, keep queue packets outside this public repo and pass `--resume-queue`.
 
 ## Design Choices
 

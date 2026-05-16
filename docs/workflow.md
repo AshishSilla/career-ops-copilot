@@ -7,7 +7,7 @@ Career Ops Copilot models a job search as a controlled workflow with two CSV-bac
 
 The sample files are anonymized demo data. For real usage, keep private CSVs outside the repository and pass them with `--job-log` and `--tracker`.
 
-The resume orchestration queue is stored as JSON packets under `data/sample_resume_queue/` by default for public-safe demos. For real usage, keep private queue packets outside the repository and pass them with `--resume-queue`. Generated sample queue JSON is ignored by Git so private evidence maps and approval notes are not accidentally committed.
+The resume orchestration queue is stored as JSON packets under `data/sample_resume_queue/` by default for public-safe demos. For real usage, keep private queue packets outside the repository and pass them with `--resume-queue`. Generated sample queue JSON and queue feedback logs are ignored by Git so private evidence maps and approval notes are not accidentally committed.
 
 ## Lifecycle
 
@@ -55,10 +55,11 @@ career-ops promote-role \
   --role "Product Analytics Lead" \
   --output-file "Ashish_Product_Analytics_Northstar.docx" \
   --tier1 88 \
-  --tier2 81
+  --tier2 81 \
+  --legacy-no-queue
 ```
 
-This creates a `Draft Built` tracker row and links the resume file back to the job log.
+This creates a `Draft Built` tracker row and links the resume file back to the job log. New resume builds should normally come from a `ready` queue packet; `--legacy-no-queue` is only for the bundled sample flow or older/manual artifacts.
 
 ## Stage 3: Review Before Applying
 
@@ -76,7 +77,8 @@ Mark it ready only after review:
 ```bash
 career-ops mark-ready \
   --output-file "Ashish_Product_Analytics_Northstar.docx" \
-  --review-status "Passed"
+  --review-status "Passed" \
+  --legacy-no-queue
 ```
 
 If a known issue is acceptable, record it explicitly:
@@ -85,7 +87,8 @@ If a known issue is acceptable, record it explicitly:
 career-ops mark-ready \
   --output-file "Ashish_Product_Analytics_Northstar.docx" \
   --review-status "Warning Accepted" \
-  --review-notes "Accepted minor tenure gap; stronger evidence exists in role-specific experience."
+  --review-notes "Accepted minor tenure gap; stronger evidence exists in role-specific experience." \
+  --legacy-no-queue
 ```
 
 ## Stage 4: Mark Applied and Track Follow-Up
@@ -105,7 +108,7 @@ The command updates both CSV files and creates a default follow-up date.
 The queue layer models the resume architecture directly:
 
 ```text
-pending_gate -> master_recommended -> feedback captured / archived
+pending_gate -> master_recommended -> feedback captured -> archived
 pending_gate -> gate_checked -> proposed -> approved -> building -> ready -> feedback captured
                        ^             ^          ^            |
                        |             |          |            |
@@ -113,7 +116,7 @@ pending_gate -> gate_checked -> proposed -> approved -> building -> ready -> fee
                           queue-retry returns to retry_target
 ```
 
-Multiple roles can be in `pending_gate`, `gate_checked`, `proposed`, or `approved` at the same time. Only one role can be in `building`, because DOCX generation and tracker writes are serialized workflow steps. The build slot is protected with a queue-level lock and atomic packet writes so concurrent CLI processes cannot both claim the build slot.
+Multiple roles can be in `pending_gate`, `gate_checked`, `proposed`, or `approved` at the same time. Only one role can be in `building`, because DOCX generation and tracker writes are serialized workflow steps. The build slot is protected with a queue-level lock and atomic packet writes so concurrent CLI processes cannot both claim the build slot. Tracker and job-log writes use a separate state lock with atomic CSV replacement.
 
 Useful commands:
 
@@ -155,7 +158,13 @@ career-ops queue-feedback \
   --role-id northstar-crm__product-analytics-lead \
   --signal-type accepted_warning \
   --note "Accepted a minor warning because the selected evidence was stronger than the master resume."
+
+career-ops queue-archive \
+  --role-id northstar-crm__product-analytics-lead \
+  --reason "Master resume was recommended and no tailored artifact was needed."
 ```
+
+New tracker updates are queue-required by default. `promote-role` and `mark-ready` require a matching `ready` queue packet unless `--legacy-no-queue` is passed for an older/manual artifact.
 
 ## Validation Rules
 
