@@ -40,114 +40,34 @@ The key design choice is that generated work cannot jump straight to completion.
 
 The resume workflow is designed as a gated system, not a one-shot generation task. The agent first decides whether customization is even justified, then maps the job description to source-backed achievements, asks for approval, builds the resume, and runs a final critic pass before the artifact is treated as ready.
 
-```text
-USER REQUEST
-  "Create resume for this role"
-        |
-        v
-[1] JD Ingest
-    - Parse role, company, location, seniority, tools, domain, must-haves
-        |
-        v
-[2] Master Resume Check
-    - Compare the JD against the relevant master resume
-    - Score requirement intensity from 1-10
-    - Decide whether the master is sufficient
-        |
-        v
- +-----------------------------+
- | [3A] Master Sufficient      |
- | - Recommend master as-is    |
- | - Ask before tailoring      |
- | - No new resume artifacts   |
- +-------------+---------------+
-               |
-               | If user approves tailoring anyway
-               v
- +-------------+---------------+
- | [3B] Customization Needed   |
- | - Scan achievement bank     |
- | - Compare master bullets    |
- | - Identify swaps and risks  |
- +-------------+---------------+
-               |
-               v
- +-------------+---------------+
- | [4] Evidence Map            |
- | - JD requirement -> bullets |
- | - Selected proof/rationale  |
- | - Rejected/watchlist items  |
- | - Summary and skills edits  |
- +-------------+---------------+
-               |
-               v
- +-------------+---------------+
- | [5] Human Approval Gate     |
- | - Approve, edit, or reject  |
- +-------------+---------------+
-               |
-               v
- +-------------+---------------+
- | [6] Build Resume            |
- | - Generate config and DOCX  |
- | - Preserve honest gaps      |
- +-------------+---------------+
-               |
-               v
- +-------------+---------------+
- | [7] Mechanical QA           |
- | - Config validation         |
- | - Preflight review          |
- | - Generated resume review   |
- | - DOCX integrity            |
- +-------------+---------------+
-               |
-               | If QA fails:
-               | fix config, bullets, summary, or formatting
-               | and rebuild from [6]
-               |
-               v
- +-------------+---------------+
- | [8] Final Critic Review     |
- | - Answers JD/config mapping?|
- | - Strongest proof visible?  |
- | - Unsupported tools absent? |
- | - Better than master as-is? |
- +-------------+---------------+
-               |
-               | If critic fails:
-               | return to [4] Evidence Map or [6] Build Resume,
-               | revise the strategy, and run QA again
-               |
-               v
- +-------------+---------------+
- | [9] Tracker State           |
- | - Review Needed             |
- | - Resume Ready              |
- | - Applied                   |
- +-------------+---------------+
-               |
-               v
- +-------------+---------------+
- | [10] Feedback Capture       |
- | - User edits or approval    |
- | - Rejected bullets/summary  |
- | - Accepted warnings         |
- | - Applied resume signal     |
- +-------------+---------------+
-               |
-               v
- +-------------+---------------+
- | [11] Learning Memory        |
- | - Feedback log              |
- | - Quality rules             |
- | - Usage matrix              |
- | - Bullet matching memory    |
- | - Review trail              |
- +-------------+---------------+
-               |
-               | Feeds future evidence selection
-               +-----------------------> back to [4]
+```mermaid
+flowchart TD
+    A[User request<br/>Create resume for this role] --> B[1. JD ingest<br/>Parse role, company, location,<br/>seniority, tools, domain, must-haves]
+    B --> C[2. Master resume check<br/>Compare against relevant master<br/>Score requirement intensity 1-10]
+    C --> D{Is the master sufficient?}
+
+    D -->|Yes| E[3A. Recommend master as-is<br/>No new resume artifacts]
+    E --> F{Does user still approve tailoring?}
+    F -->|No| Z[Complete<br/>Use master resume]
+    F -->|Yes| G[3B. Customization needed<br/>Scan achievement bank<br/>Compare master bullets<br/>Identify swaps and risks]
+
+    D -->|No| G
+    G --> H[4. Evidence map<br/>JD requirement -> candidate bullets<br/>Selected proof and rationale<br/>Rejected/watchlist items<br/>Summary and skills edits]
+    H --> I[5. Human approval gate<br/>Approve, edit, or reject mapping]
+    I -->|Rejected or needs changes| H
+    I -->|Approved| J[6. Build resume<br/>Generate config and DOCX<br/>Preserve honest gaps]
+
+    J --> K[7. Mechanical QA<br/>Config validation<br/>Preflight review<br/>Generated resume review<br/>DOCX integrity]
+    K -->|Fails| J
+    K -->|Passes| L[8. Final critic review<br/>Answers JD/config mapping?<br/>Strongest proof visible?<br/>Unsupported tools absent?<br/>Better than master as-is?]
+    L -->|Strategic issue| H
+    L -->|Build/content issue| J
+    L -->|Passes| M[9. Tracker state<br/>Review Needed<br/>Resume Ready<br/>Applied]
+
+    M --> N[10. Feedback capture<br/>User edits or approval<br/>Rejected bullets/summary<br/>Accepted warnings<br/>Applied resume signal]
+    N --> O[11. Learning memory<br/>Feedback log<br/>Quality rules<br/>Usage matrix<br/>Bullet matching memory<br/>Review trail]
+    O -->|Feeds future evidence selection| H
+    O --> P[Complete<br/>Workflow state updated]
 ```
 
 The key product decision is the separation between **generation** and **approval**. AI can draft and compare quickly, but the workflow forces evidence mapping, explicit approval, mechanical validation, and a final critic review before a resume moves forward.
