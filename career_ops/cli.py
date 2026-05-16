@@ -972,7 +972,7 @@ def queue_retry(args: argparse.Namespace) -> int:
 def queue_feedback(args: argparse.Namespace) -> int:
     with queue_lock():
         packet = load_packet(args.role_id)
-        assert_status(packet, {"master_recommended", "approved", "ready", "failed", "archived"})
+        assert_status(packet, {"master_recommended", "proposed", "approved", "ready", "failed", "archived"})
         if len(args.note.split()) < 6:
             raise SystemExit("--note must capture the feedback signal with at least 6 words")
         feedback = {
@@ -1013,7 +1013,7 @@ def queue_feedback(args: argparse.Namespace) -> int:
 def queue_archive(args: argparse.Namespace) -> int:
     with queue_lock():
         packet = load_packet(args.role_id)
-        assert_status(packet, {"master_recommended", "ready", "failed", "archived"})
+        assert_status(packet, {"master_recommended", "proposed", "approved", "ready", "failed", "archived"})
         if len(args.reason.split()) < 6:
             raise SystemExit("--reason must explain why this packet is being archived")
         packet["status"] = "archived"

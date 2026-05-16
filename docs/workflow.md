@@ -164,6 +164,8 @@ career-ops queue-archive \
   --reason "Master resume was recommended and no tailored artifact was needed."
 ```
 
+`queue-feedback` can capture proposal-stage rejection/edit signals before a build, and `queue-archive` can close `master_recommended`, `proposed`, `approved`, `ready`, or `failed` packets with a reason. Archiving is for intentional closure; failure/retry is for work that should be repaired and continued.
+
 New tracker updates are queue-required by default. `promote-role` and `mark-ready` require a matching `ready` queue packet unless `--legacy-no-queue` is passed for an older/manual artifact.
 
 ## Validation Rules
@@ -187,6 +189,8 @@ Strict mode treats warnings as failures:
 career-ops validate-state --strict
 career-ops validate-queue --strict
 ```
+
+An empty queue passing validation only means there are no invalid queue packets; it does not mean there is active resume work in progress.
 
 ## Why This Matters
 

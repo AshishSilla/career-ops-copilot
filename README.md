@@ -314,6 +314,8 @@ career-ops queue-archive \
   --reason "Master resume was recommended and no tailored artifact was needed."
 ```
 
+`queue-feedback` can capture proposal-stage rejection/edit signals before a build, and `queue-archive` can close `master_recommended`, `proposed`, `approved`, `ready`, or `failed` packets with a reason.
+
 View queue state:
 
 ```bash
@@ -322,6 +324,8 @@ career-ops validate-queue
 ```
 
 Queue writes are lock-protected and packet files are written atomically. Tracker/log CSV writes are also protected with a state lock and atomic replacement. The sample queue ignores generated JSON files and queue feedback logs in Git so private JD mappings, approval notes, and feedback signals are not accidentally committed. For real usage, keep queue packets outside this public repo and pass `--resume-queue`.
+
+An empty queue passing validation only means there are no invalid queue packets; it does not mean there is active resume work in progress.
 
 ## Design Choices
 

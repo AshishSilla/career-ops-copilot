@@ -9,4 +9,5 @@ data/sample_resume_queue/*.json
 !data/sample_resume_queue/.gitkeep
 data/sample_resume_queue/.queue.lock
 data/sample_resume_queue/.feedback_log.jsonl
+data/sample_resume_queue/tmp*
 .career_ops_state.lock
