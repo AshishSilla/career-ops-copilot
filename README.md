@@ -54,47 +54,73 @@ USER REQUEST
     - Score requirement intensity from 1-10
     - Decide whether the master is sufficient
         |
-        +-----------------------------+
-        |                             |
-        v                             v
-[3A] Master Sufficient          [3B] Customization Candidate
-    - Stop                         - Scan achievement bank
-    - Recommend master as-is        - Compare master bullets vs stronger evidence
-    - Ask before tailoring          - Identify swaps, gaps, and risks
-        |                             |
-        |                             v
-        |                         [4] Evidence Map
-        |                             - JD requirement -> candidate bullets
-        |                             - Selected evidence -> rationale
-        |                             - Rejected/watchlist bullets
-        |                             - Summary and skills changes
-        |                             |
-        |                             v
-        |                         [5] Human Approval Gate
-        |                             - Approve, edit, or reject the proposed mapping
-        |                             |
-        |                             v
-        |                         [6] Build Resume
-        |                             - Generate config and DOCX
-        |                             - Preserve honest gaps and claims to avoid
-        |                             |
-        |                             v
-        |                         [7] Mechanical QA
-        |                             - Config validation
-        |                             - Preflight review
-        |                             - Generated resume review
-        |                             - DOCX integrity
-        |                             |
-        |                             v
-        |                         [8] Final Critic Review
-        |                             - Does it answer the real JD?
-        |                             - Is the strongest proof above the fold?
-        |                             - Are unsupported tools absent?
-        |                             - Is it better than the master as-is?
-        |                             |
-        |                             v
-        |                         [9] Tracker State
-        |                             - Review Needed / Resume Ready / Applied
+        v
+ +-----------------------------+
+ | [3A] Master Sufficient      |
+ | - Recommend master as-is    |
+ | - Ask before tailoring      |
+ | - No new resume artifacts   |
+ +-------------+---------------+
+               |
+               | If user approves tailoring anyway
+               v
+ +-------------+---------------+
+ | [3B] Customization Needed   |
+ | - Scan achievement bank     |
+ | - Compare master bullets    |
+ | - Identify swaps and risks  |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [4] Evidence Map            |
+ | - JD requirement -> bullets |
+ | - Selected proof/rationale  |
+ | - Rejected/watchlist items  |
+ | - Summary and skills edits  |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [5] Human Approval Gate     |
+ | - Approve, edit, or reject  |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [6] Build Resume            |
+ | - Generate config and DOCX  |
+ | - Preserve honest gaps      |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [7] Mechanical QA           |
+ | - Config validation         |
+ | - Preflight review          |
+ | - Generated resume review   |
+ | - DOCX integrity            |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [8] Final Critic Review     |
+ | - Answers the real JD?      |
+ | - Strongest proof visible?  |
+ | - Unsupported tools absent? |
+ | - Better than master as-is? |
+ +-------------+---------------+
+               |
+               v
+ +-------------+---------------+
+ | [9] Tracker State           |
+ | - Review Needed             |
+ | - Resume Ready              |
+ | - Applied                   |
+ +-------------+---------------+
+               |
+               v
+            COMPLETE
 ```
 
 The key product decision is the separation between **generation** and **approval**. AI can draft and compare quickly, but the workflow forces evidence mapping, explicit approval, mechanical validation, and a final critic review before a resume moves forward.
