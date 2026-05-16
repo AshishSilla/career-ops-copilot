@@ -7,6 +7,8 @@ Career Ops Copilot models a job search as a controlled workflow with two CSV-bac
 
 The sample files are anonymized demo data. For real usage, keep private CSVs outside the repository and pass them with `--job-log` and `--tracker`.
 
+The resume orchestration queue is stored as JSON packets under `data/sample_resume_queue/` by default. For real usage, keep private queue packets outside the repository and pass them with `--resume-queue`.
+
 ## Lifecycle
 
 ```text
@@ -97,6 +99,38 @@ career-ops mark-applied \
 ```
 
 The command updates both CSV files and creates a default follow-up date.
+
+## Stage 5: Orchestrate Resume Builds
+
+The queue layer models the resume architecture directly:
+
+```text
+pending_gate -> gate_checked -> proposed -> approved -> building -> ready
+                                           \-> failed -> retry target
+```
+
+Multiple roles can be in `pending_gate`, `gate_checked`, `proposed`, or `approved` at the same time. Only one role can be in `building`, because DOCX generation and tracker writes are serialized workflow steps.
+
+Useful commands:
+
+```bash
+career-ops queue-add --company "Northstar CRM" --role "Product Analytics Lead" --track A
+career-ops queue-gate --role-id northstar-crm__product-analytics-lead --requirement-intensity 8 --gate-decision customization_needed --reason "The JD requires a specialized evidence map beyond the master resume." --next-action "Scan achievements and request approval."
+career-ops queue-propose --role-id northstar-crm__product-analytics-lead --evidence-map "JD requirements mapped to source-backed bullets." --proposed-changes "Change summary, move data-quality proof up, and avoid unsupported tools."
+career-ops queue-approve --role-id northstar-crm__product-analytics-lead --approval-note "Approved after reviewing the evidence map and proposed bullet swaps."
+career-ops queue-start-build --role-id northstar-crm__product-analytics-lead --output-file Ashish_Product_Analytics_Northstar.docx
+career-ops queue-complete-build --role-id northstar-crm__product-analytics-lead --output-file Ashish_Product_Analytics_Northstar.docx --mechanical-qa Passed --final-critic Passed
+```
+
+If QA or the final critic fails, use `queue-fail` with a retry target:
+
+```bash
+career-ops queue-fail \
+  --role-id northstar-crm__product-analytics-lead \
+  --stage final_critic \
+  --reason "The strongest evidence was not above the fold." \
+  --retry-target evidence_map
+```
 
 ## Validation Rules
 

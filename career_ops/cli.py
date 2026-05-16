@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -30,8 +31,10 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parents[1]
 DEFAULT_JOB_LOG = BASE / "data" / "sample_job_search_log.csv"
 DEFAULT_TRACKER = BASE / "data" / "sample_application_tracker.csv"
+DEFAULT_RESUME_QUEUE = BASE / "data" / "sample_resume_queue"
 JOB_LOG = DEFAULT_JOB_LOG
 TRACKER = DEFAULT_TRACKER
+RESUME_QUEUE = DEFAULT_RESUME_QUEUE
 
 JOB_LOG_FIELDS = [
     "search_date",
@@ -92,6 +95,24 @@ DECISION_REASONS = {
     "Built before strict gate",
     "Needs verification",
 }
+QUEUE_STATUSES = {
+    "pending_gate",
+    "master_recommended",
+    "gate_checked",
+    "proposed",
+    "approved",
+    "building",
+    "ready",
+    "failed",
+}
+GATE_DECISIONS = {"use_master_as_is", "customization_needed"}
+BUILD_STAGES = {"mechanical_qa", "final_critic", "docx_build", "state_update"}
+RETRY_TARGETS = {"master_check", "evidence_map", "build_resume", "human_approval"}
+MASTER_BY_TRACK = {
+    "A": "01_master_resumes/Ashish_Gupta_Silla_Analytics_Leader.docx",
+    "B": "01_master_resumes/Ashish_Gupta_Silla_Analytics_Leader.docx",
+    "P": "01_master_resumes/Ashish_Product_Specialist.docx",
+}
 
 
 @dataclass
@@ -103,6 +124,52 @@ class Finding:
 
 def normalize(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+    return slug or "role"
+
+
+def role_id(company: str, role: str) -> str:
+    return f"{slugify(company)}__{slugify(role)}"
+
+
+def queue_path(role_id_value: str) -> Path:
+    return RESUME_QUEUE / f"{role_id_value}.json"
+
+
+def ensure_queue_dir() -> None:
+    RESUME_QUEUE.mkdir(parents=True, exist_ok=True)
+
+
+def load_packet(role_id_value: str) -> dict:
+    path = queue_path(role_id_value)
+    if not path.exists():
+        raise SystemExit(f"No queue packet found for role_id {role_id_value!r}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_packet(packet: dict) -> None:
+    ensure_queue_dir()
+    packet["updated_at"] = today()
+    path = queue_path(packet["role_id"])
+    path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def queue_packets() -> list[dict]:
+    ensure_queue_dir()
+    packets: list[dict] = []
+    for path in sorted(RESUME_QUEUE.glob("*.json")):
+        packets.append(json.loads(path.read_text(encoding="utf-8")))
+    return packets
+
+
+def assert_status(packet: dict, allowed: set[str]) -> None:
+    if packet.get("status") not in allowed:
+        raise SystemExit(
+            f"Role {packet.get('role_id')} is {packet.get('status')!r}; expected one of {', '.join(sorted(allowed))}"
+        )
 
 
 def today() -> str:
@@ -444,6 +511,200 @@ def mark_applied(args: argparse.Namespace) -> int:
     return 0
 
 
+def queue_add(args: argparse.Namespace) -> int:
+    ensure_queue_dir()
+    new_role_id = args.role_id or role_id(args.company, args.role)
+    path = queue_path(new_role_id)
+    if path.exists():
+        raise SystemExit(f"Queue packet already exists: {display_path(path)}")
+    if args.track not in MASTER_BY_TRACK:
+        raise SystemExit(f"Unsupported track {args.track!r}")
+    packet = {
+        "role_id": new_role_id,
+        "company": args.company,
+        "role": args.role,
+        "jd_url": args.jd_url or "",
+        "track": args.track,
+        "location_type": args.location_type or "",
+        "location_city": args.location_city or "",
+        "status": "pending_gate",
+        "created_at": today(),
+        "updated_at": today(),
+        "master_resume_path": MASTER_BY_TRACK[args.track],
+        "gate": {},
+        "proposal": {},
+        "approval": {},
+        "build": {},
+        "feedback": {},
+        "history": [
+            {
+                "date": today(),
+                "event": "queued",
+                "note": "Role queued for master-resume gate.",
+            }
+        ],
+    }
+    write_packet(packet)
+    print(f"Queued role {new_role_id}: {args.company} - {args.role}")
+    print(f"Next: career-ops --resume-queue {display_path(RESUME_QUEUE)} queue-gate --role-id {new_role_id} ...")
+    return 0
+
+
+def queue_gate(args: argparse.Namespace) -> int:
+    packet = load_packet(args.role_id)
+    assert_status(packet, {"pending_gate", "master_recommended", "gate_checked", "failed"})
+    if args.requirement_intensity > 7 and args.gate_decision == "use_master_as_is":
+        raise SystemExit("use_master_as_is is inconsistent with requirement intensity above 7")
+    if args.requirement_intensity <= 7 and args.gate_decision == "customization_needed":
+        raise SystemExit("customization_needed with intensity <= 7 needs a stronger reason or should use the master")
+    if len(args.reason.split()) < 8:
+        raise SystemExit("--reason must explain the gate decision with at least 8 words")
+
+    packet["gate"] = {
+        "master_resume_checked": True,
+        "master_resume_path": packet.get("master_resume_path", ""),
+        "requirement_intensity": args.requirement_intensity,
+        "gate_decision": args.gate_decision,
+        "reason": args.reason,
+        "next_action": args.next_action,
+    }
+    packet["status"] = "master_recommended" if args.gate_decision == "use_master_as_is" else "gate_checked"
+    packet.setdefault("history", []).append({"date": today(), "event": "gate_checked", "note": args.reason})
+    write_packet(packet)
+    print(f"Gate recorded for {args.role_id}: {args.gate_decision}")
+    if packet["status"] == "master_recommended":
+        print("Stop before tailoring unless the user explicitly approves customization anyway.")
+    else:
+        print("Next: run achievement-bank scan and record proposal with queue-propose.")
+    return 0
+
+
+def queue_propose(args: argparse.Namespace) -> int:
+    packet = load_packet(args.role_id)
+    assert_status(packet, {"gate_checked", "proposed", "failed"})
+    gate = packet.get("gate", {})
+    if gate.get("gate_decision") != "customization_needed":
+        raise SystemExit("queue-propose requires gate_decision=customization_needed")
+    if len(args.evidence_map.split()) < 8:
+        raise SystemExit("--evidence-map must summarize JD-to-achievement mapping")
+    if len(args.proposed_changes.split()) < 8:
+        raise SystemExit("--proposed-changes must describe concrete master-vs-tailored changes")
+
+    packet["proposal"] = {
+        "evidence_map": args.evidence_map,
+        "proposed_changes": args.proposed_changes,
+        "honest_gaps": args.honest_gaps or "",
+        "claims_to_avoid": args.claims_to_avoid or "",
+        "proposal_ready_for_user": True,
+    }
+    packet["status"] = "proposed"
+    packet.setdefault("history", []).append({"date": today(), "event": "proposal_recorded", "note": args.proposed_changes})
+    write_packet(packet)
+    print(f"Proposal recorded for {args.role_id}. Next: queue-approve after user approval.")
+    return 0
+
+
+def queue_approve(args: argparse.Namespace) -> int:
+    packet = load_packet(args.role_id)
+    assert_status(packet, {"proposed", "approved"})
+    if len(args.approval_note.split()) < 8:
+        raise SystemExit("--approval-note must capture user approval or mapping direction")
+    packet["approval"] = {
+        "approved_by": args.approved_by,
+        "approved_at": args.approved_at or today(),
+        "evidence_map_presented_to_user": True,
+        "approval_after_evidence_map": True,
+        "approval_note": args.approval_note,
+    }
+    packet["status"] = "approved"
+    packet.setdefault("history", []).append({"date": today(), "event": "approved", "note": args.approval_note})
+    write_packet(packet)
+    print(f"Approved {args.role_id}. Next: queue-start-build when the serialized build slot is free.")
+    return 0
+
+
+def queue_start_build(args: argparse.Namespace) -> int:
+    packet = load_packet(args.role_id)
+    assert_status(packet, {"approved", "failed"})
+    active = [item for item in queue_packets() if item.get("status") == "building" and item.get("role_id") != args.role_id]
+    if active:
+        active_ids = ", ".join(item.get("role_id", "") for item in active)
+        raise SystemExit(f"Build slot is already occupied by: {active_ids}")
+    if not packet.get("approval", {}).get("approval_after_evidence_map"):
+        raise SystemExit("Cannot build before approval_after_evidence_map=true")
+    packet["status"] = "building"
+    packet["build"] = {
+        "started_at": args.started_at or today(),
+        "output_file": args.output_file or "",
+        "build_owner": args.build_owner,
+        "serialized_build_slot": True,
+    }
+    packet.setdefault("history", []).append({"date": today(), "event": "build_started", "note": args.output_file or ""})
+    write_packet(packet)
+    print(f"Build started for {args.role_id}. No other packet can enter building until this completes or fails.")
+    return 0
+
+
+def queue_complete_build(args: argparse.Namespace) -> int:
+    packet = load_packet(args.role_id)
+    assert_status(packet, {"building", "ready"})
+    packet["status"] = "ready"
+    packet.setdefault("build", {}).update(
+        {
+            "completed_at": args.completed_at or today(),
+            "output_file": args.output_file,
+            "mechanical_qa": args.mechanical_qa,
+            "final_critic": args.final_critic,
+            "notes": args.notes or "",
+        }
+    )
+    packet.setdefault("history", []).append(
+        {"date": today(), "event": "build_completed", "note": f"{args.output_file}; {args.final_critic}"}
+    )
+    write_packet(packet)
+    print(f"Build completed for {args.role_id}: {args.output_file}")
+    print("Next: promote/mark tracker state with the normal career-ops lifecycle commands.")
+    return 0
+
+
+def queue_fail(args: argparse.Namespace) -> int:
+    packet = load_packet(args.role_id)
+    assert_status(packet, {"building", "proposed", "approved", "failed"})
+    if len(args.reason.split()) < 6:
+        raise SystemExit("--reason must explain the failure")
+    packet["status"] = "failed"
+    packet["failure"] = {
+        "failed_at": args.failed_at or today(),
+        "stage": args.stage,
+        "reason": args.reason,
+        "retry_target": args.retry_target,
+    }
+    packet.setdefault("history", []).append(
+        {"date": today(), "event": "failed", "note": f"{args.stage}: {args.reason}; retry {args.retry_target}"}
+    )
+    write_packet(packet)
+    print(f"Marked failed: {args.role_id}. Retry target: {args.retry_target}")
+    return 0
+
+
+def queue_status(args: argparse.Namespace) -> int:
+    packets = queue_packets()
+    if args.role_id:
+        packets = [packet for packet in packets if packet.get("role_id") == args.role_id]
+    if not packets:
+        print("No queue packets found.")
+        return 0
+    for packet in packets:
+        print(
+            f"{packet.get('role_id')} | {packet.get('status')} | "
+            f"{packet.get('company')} - {packet.get('role')} | updated {packet.get('updated_at')}"
+        )
+    active = [packet.get("role_id") for packet in packets if packet.get("status") == "building"]
+    if active:
+        print(f"\nSerialized build slot occupied by: {', '.join(active)}")
+    return 0
+
+
 def print_findings(findings: list[Finding]) -> None:
     if not findings:
         print("[PASS] career ops state is valid")
@@ -472,6 +733,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_TRACKER,
         help="Path to the application tracker CSV",
+    )
+    parser.add_argument(
+        "--resume-queue",
+        type=Path,
+        default=DEFAULT_RESUME_QUEUE,
+        help="Directory for resume orchestration queue packets",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -510,6 +777,67 @@ def parse_args() -> argparse.Namespace:
     applied.add_argument("--follow-up-days", type=int, default=7)
     applied.set_defaults(func=mark_applied)
 
+    queue_add_parser = subparsers.add_parser("queue-add", help="Add a role to the resume orchestration queue")
+    queue_add_parser.add_argument("--company", required=True)
+    queue_add_parser.add_argument("--role", required=True)
+    queue_add_parser.add_argument("--track", required=True, choices=sorted(MASTER_BY_TRACK))
+    queue_add_parser.add_argument("--jd-url", default="")
+    queue_add_parser.add_argument("--location-type", default="")
+    queue_add_parser.add_argument("--location-city", default="")
+    queue_add_parser.add_argument("--role-id")
+    queue_add_parser.set_defaults(func=queue_add)
+
+    queue_gate_parser = subparsers.add_parser("queue-gate", help="Record the master-resume customization gate")
+    queue_gate_parser.add_argument("--role-id", required=True)
+    queue_gate_parser.add_argument("--requirement-intensity", required=True, type=int, choices=range(1, 11))
+    queue_gate_parser.add_argument("--gate-decision", required=True, choices=sorted(GATE_DECISIONS))
+    queue_gate_parser.add_argument("--reason", required=True)
+    queue_gate_parser.add_argument("--next-action", required=True)
+    queue_gate_parser.set_defaults(func=queue_gate)
+
+    queue_propose_parser = subparsers.add_parser("queue-propose", help="Record the evidence map and proposed customization")
+    queue_propose_parser.add_argument("--role-id", required=True)
+    queue_propose_parser.add_argument("--evidence-map", required=True)
+    queue_propose_parser.add_argument("--proposed-changes", required=True)
+    queue_propose_parser.add_argument("--honest-gaps", default="")
+    queue_propose_parser.add_argument("--claims-to-avoid", default="")
+    queue_propose_parser.set_defaults(func=queue_propose)
+
+    queue_approve_parser = subparsers.add_parser("queue-approve", help="Record user approval after evidence mapping")
+    queue_approve_parser.add_argument("--role-id", required=True)
+    queue_approve_parser.add_argument("--approval-note", required=True)
+    queue_approve_parser.add_argument("--approved-by", default="Ashish")
+    queue_approve_parser.add_argument("--approved-at")
+    queue_approve_parser.set_defaults(func=queue_approve)
+
+    queue_start_parser = subparsers.add_parser("queue-start-build", help="Enter the serialized build slot")
+    queue_start_parser.add_argument("--role-id", required=True)
+    queue_start_parser.add_argument("--output-file", default="")
+    queue_start_parser.add_argument("--build-owner", default="build-agent")
+    queue_start_parser.add_argument("--started-at")
+    queue_start_parser.set_defaults(func=queue_start_build)
+
+    queue_complete_parser = subparsers.add_parser("queue-complete-build", help="Mark a queued build as ready")
+    queue_complete_parser.add_argument("--role-id", required=True)
+    queue_complete_parser.add_argument("--output-file", required=True)
+    queue_complete_parser.add_argument("--mechanical-qa", required=True, choices=["Passed", "Warning Accepted"])
+    queue_complete_parser.add_argument("--final-critic", required=True, choices=["Passed", "Warning Accepted"])
+    queue_complete_parser.add_argument("--notes", default="")
+    queue_complete_parser.add_argument("--completed-at")
+    queue_complete_parser.set_defaults(func=queue_complete_build)
+
+    queue_fail_parser = subparsers.add_parser("queue-fail", help="Mark a queued role as failed with a retry target")
+    queue_fail_parser.add_argument("--role-id", required=True)
+    queue_fail_parser.add_argument("--stage", required=True, choices=sorted(BUILD_STAGES))
+    queue_fail_parser.add_argument("--reason", required=True)
+    queue_fail_parser.add_argument("--retry-target", required=True, choices=sorted(RETRY_TARGETS))
+    queue_fail_parser.add_argument("--failed-at")
+    queue_fail_parser.set_defaults(func=queue_fail)
+
+    queue_status_parser = subparsers.add_parser("queue-status", help="List resume orchestration queue packets")
+    queue_status_parser.add_argument("--role-id")
+    queue_status_parser.set_defaults(func=queue_status)
+
     args = parser.parse_args()
     if getattr(args, "company", None) and not getattr(args, "role", None) and args.command != "promote-role":
         parser.error("--role is required when matching by --company")
@@ -517,10 +845,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    global JOB_LOG, TRACKER
+    global JOB_LOG, TRACKER, RESUME_QUEUE
     args = parse_args()
     JOB_LOG = args.job_log
     TRACKER = args.tracker
+    RESUME_QUEUE = args.resume_queue
     return args.func(args)
 
 

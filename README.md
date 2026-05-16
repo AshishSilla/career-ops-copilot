@@ -21,6 +21,8 @@ The goal was not to build a heavy SaaS app. The goal was to build a high-agency 
 
 - Validates job-search and application-tracker CSV schemas.
 - Enforces clean lifecycle states such as `Pursued`, `Draft Built`, `Review Needed`, `Resume Ready`, and `Applied`.
+- Orchestrates resume workflow packets through master-check, evidence-map, approval, build, QA, critic, and feedback states.
+- Allows multiple roles to be analyzed/proposed in parallel while enforcing a single serialized build slot.
 - Promotes a pursued role from the job log into the application tracker.
 - Tracks resume coverage scores, review status, accepted warnings, application dates, and follow-up dates.
 - Sorts state files into a consistent order.
@@ -129,6 +131,7 @@ career-ops-copilot/
   data/
     sample_job_search_log.csv
     sample_application_tracker.csv
+    sample_resume_queue/
   docs/
     workflow.md
   README.md
@@ -155,6 +158,7 @@ By default, commands run against the bundled anonymized sample files:
 ```text
 data/sample_job_search_log.csv
 data/sample_application_tracker.csv
+data/sample_resume_queue/
 ```
 
 To use your own CSV files, pass the file paths before the command:
@@ -225,17 +229,93 @@ career-ops mark-applied \
 
 Together, these commands show the intended operating loop: validate state, promote a role, move the resume into review, mark it ready only after review, then mark the application submitted.
 
+## Resume Queue Commands
+
+The queue commands make the architecture live. They create one JSON packet per role and move it through the master gate, evidence map, approval, serialized build slot, and ready/failed states.
+
+Add two roles to the queue:
+
+```bash
+career-ops queue-add \
+  --company "Northstar CRM" \
+  --role "Product Analytics Lead" \
+  --track A \
+  --jd-url "https://example.com/jobs/northstar"
+
+career-ops queue-add \
+  --company "LedgerWorks" \
+  --role "BI Manager" \
+  --track A \
+  --jd-url "https://example.com/jobs/ledgerworks"
+```
+
+Record the master-resume gate and proposed evidence map:
+
+```bash
+career-ops queue-gate \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --requirement-intensity 8 \
+  --gate-decision customization_needed \
+  --reason "The JD emphasizes specialized product analytics, governance, and stakeholder mapping beyond the master resume." \
+  --next-action "Scan the achievement bank and ask for approval on proposed bullet swaps."
+
+career-ops queue-propose \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --evidence-map "Map JD analytics governance to source-backed dashboard, instrumentation, and data-quality bullets." \
+  --proposed-changes "Move data-quality proof higher, tune summary toward product analytics leadership, and avoid unsupported tools."
+```
+
+Approve and enter the serialized build slot:
+
+```bash
+career-ops queue-approve \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --approval-note "Approved after reviewing the evidence map and proposed bullet swaps."
+
+career-ops queue-start-build \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --output-file "Ashish_Product_Analytics_Northstar.docx"
+```
+
+Only one packet can be in `building` at a time. Other roles can still sit in `proposed` or `approved`, but they cannot enter the build slot until the active build is completed or failed.
+
+Complete or fail the build:
+
+```bash
+career-ops queue-complete-build \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --output-file "Ashish_Product_Analytics_Northstar.docx" \
+  --mechanical-qa "Passed" \
+  --final-critic "Passed"
+
+career-ops queue-fail \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --stage final_critic \
+  --reason "Final critic found the strongest evidence was not above the fold." \
+  --retry-target evidence_map
+```
+
+View queue state:
+
+```bash
+career-ops queue-status
+```
+
 ## Design Choices
 
 I kept the storage layer as CSV because it is easy to audit, easy to edit manually, and works well with AI-assisted workflows. The CLI provides the guardrails that spreadsheets usually lack: required headers, controlled status values, date validation, duplicate detection, and lifecycle rules.
 
 I also separated `sample_job_search_log.csv` from `sample_application_tracker.csv` because the job-search funnel has two different modes: many roles are researched and rejected, while only a smaller set become active resume/application work.
 
+Resume orchestration uses JSON packets instead of CSV rows because each role needs nested state: master-gate details, evidence-map notes, approval metadata, build status, failure reasons, and feedback memory. The queue stays file-based and auditable, but it avoids forcing nested workflow state into wide CSV columns.
+
 ## Sample Data
 
 The repository includes anonymized sample rows only. The original private job-search data, personal resume files, application history, and company-specific notes are intentionally excluded.
 
 The sample files are intentionally named with the `sample_` prefix so they are clearly public demo data, not production state.
+
+`data/sample_resume_queue/` is intentionally empty except for a placeholder file. It demonstrates where public-safe queue packets live without exposing private job descriptions, resume mappings, or approval notes.
 
 ## Inspiration and Attribution
 
