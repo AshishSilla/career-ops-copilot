@@ -5,4 +5,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-
+data/sample_resume_queue/*.json
+!data/sample_resume_queue/.gitkeep
+data/sample_resume_queue/.queue.lock

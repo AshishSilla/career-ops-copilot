@@ -60,23 +60,26 @@ flowchart TD
     I -->|Approved| J[6. Build resume<br/>Generate config and DOCX<br/>Preserve honest gaps]
 
     J --> K[7. Mechanical QA<br/>Config validation<br/>Preflight review<br/>Generated resume review<br/>DOCX integrity]
-    K -->|Fails| J
+    K -->|Fails| QAFAIL[Failure recorded<br/>retry_target = build_resume]
+    QAFAIL -->|queue-retry| J
     K -->|Passes| L[8. Final critic review<br/>Answers JD/config mapping?<br/>Strongest proof visible?<br/>Unsupported tools absent?<br/>Better than master as-is?]
-    L -->|Strategic issue| H
-    L -->|Build/content issue| J
+    L -->|Strategic issue| CRITFAIL1[Failure recorded<br/>retry_target = evidence_map]
+    CRITFAIL1 -->|queue-retry| H
+    L -->|Build/content issue| CRITFAIL2[Failure recorded<br/>retry_target = build_resume]
+    CRITFAIL2 -->|queue-retry| J
     L -->|Passes| M[9. Tracker state<br/>Review Needed<br/>Resume Ready<br/>Applied]
 
     M --> N[10. Feedback capture<br/>User edits or approval<br/>Rejected bullets/summary<br/>Accepted warnings<br/>Applied resume signal]
     N --> O[11. Learning memory<br/>Feedback log<br/>Quality rules<br/>Usage matrix<br/>Bullet matching memory<br/>Review trail]
-    O -->|Feeds future evidence selection| H
+    O -->|queue-feedback feeds future evidence selection| H
     O --> P[Complete<br/>Workflow state updated]
 ```
 
 The key product decision is the separation between **generation** and **approval**. AI can draft and compare quickly, but the workflow forces evidence mapping, explicit approval, mechanical validation, and a final critic review before a resume moves forward.
 
-Failures are expected to loop backward, not move forward with caveats. Mechanical QA failures go back to the build/config layer. Final critic failures go back to the evidence map or resume strategy layer, because the issue is usually strategic rather than formatting-related. A resume reaches tracker state only after both loops are clean.
+Failures are expected to loop backward, not move forward with caveats. Mechanical QA failures are recorded with `queue-fail --retry-target build_resume`, then reopened with `queue-retry` before another build can start. Final critic failures use either `--retry-target evidence_map` for strategy issues or `--retry-target build_resume` for content/build issues. A failed packet cannot jump straight back into `building`; the retry target must be opened and repaired first.
 
-The feedback loop is different from the QA loop. QA and critic loops fix the current resume; feedback capture improves future resumes. It is triggered after review, approval, rejection, accepted warnings, manual edits, or application. Those signals update the feedback log, quality rules, usage matrix, bullet matching memory, and review trail so the next evidence map starts with stronger preferences.
+The feedback loop is different from the QA loop. QA and critic loops fix the current resume; feedback capture improves future resumes. It is triggered after review, approval, rejection, accepted warnings, manual edits, or application. Those signals are captured with `queue-feedback`, updating the feedback log, learning memory, usage matrix, bullet matching memory, and review trail so the next evidence map starts with stronger preferences.
 
 In the private version of this system, future tailored resume configs are blocked unless they record the master-resume gate, the achievement-bank scan, the master-vs-tailored comparison, and confirmation that user approval happened after the evidence map was presented. That makes the review process auditable instead of relying on the agent to remember the right sequence.
 
@@ -293,13 +296,26 @@ career-ops queue-fail \
   --stage final_critic \
   --reason "Final critic found the strongest evidence was not above the fold." \
   --retry-target evidence_map
+
+career-ops queue-retry \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --retry-target evidence_map \
+  --note "Reopening the evidence map before another approval/build cycle."
+
+career-ops queue-feedback \
+  --role-id "northstar-crm__product-analytics-lead" \
+  --signal-type accepted_warning \
+  --note "Accepted a minor summary tradeoff because the role-specific evidence stayed stronger."
 ```
 
 View queue state:
 
 ```bash
 career-ops queue-status
+career-ops validate-queue
 ```
+
+Queue writes are lock-protected and packet files are written atomically. The sample queue ignores generated JSON files in Git so private JD mappings, approval notes, and feedback signals are not accidentally committed. For real usage, keep queue packets outside this public repo and pass `--resume-queue`.
 
 ## Design Choices
 

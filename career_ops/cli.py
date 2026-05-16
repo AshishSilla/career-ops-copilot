@@ -21,11 +21,19 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback for local demos.
+    fcntl = None
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -143,25 +151,47 @@ def ensure_queue_dir() -> None:
     RESUME_QUEUE.mkdir(parents=True, exist_ok=True)
 
 
+@contextmanager
+def queue_lock():
+    ensure_queue_dir()
+    lock_path = RESUME_QUEUE / ".queue.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def load_packet(role_id_value: str) -> dict:
     path = queue_path(role_id_value)
     if not path.exists():
         raise SystemExit(f"No queue packet found for role_id {role_id_value!r}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    packet["_path"] = path
+    return packet
 
 
 def write_packet(packet: dict) -> None:
     ensure_queue_dir()
     packet["updated_at"] = today()
     path = queue_path(packet["role_id"])
-    path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = {key: value for key, value in packet.items() if key != "_path"}
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=RESUME_QUEUE, delete=False) as tmp:
+        tmp.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
 
 
 def queue_packets() -> list[dict]:
     ensure_queue_dir()
     packets: list[dict] = []
     for path in sorted(RESUME_QUEUE.glob("*.json")):
-        packets.append(json.loads(path.read_text(encoding="utf-8")))
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        packet["_path"] = path
+        packets.append(packet)
     return packets
 
 
@@ -332,6 +362,105 @@ def validate_tracker(rows: list[dict[str, str]], job_rows: list[dict[str, str]])
     return findings
 
 
+def matching_queue_packets(company: str, role: str, output_file: str = "") -> list[dict]:
+    matches: list[dict] = []
+    for packet in queue_packets():
+        output_matches = output_file and packet.get("build", {}).get("output_file") == output_file
+        role_matches = normalize(packet.get("company")) == normalize(company) and normalize(packet.get("role")) == normalize(role)
+        if output_matches or role_matches:
+            matches.append(packet)
+    return matches
+
+
+def enforce_ready_queue_packet(company: str, role: str, output_file: str) -> None:
+    matches = matching_queue_packets(company, role, output_file)
+    if not matches:
+        return
+    ready_matches = [
+        packet
+        for packet in matches
+        if packet.get("status") == "ready" and packet.get("build", {}).get("output_file") == output_file
+    ]
+    if not ready_matches:
+        statuses = ", ".join(f"{packet.get('role_id')}={packet.get('status')}" for packet in matches)
+        raise SystemExit(
+            "Tracker update is blocked because matching queue packet(s) are not ready "
+            f"for {output_file!r}: {statuses}"
+        )
+
+
+def validate_queue(packets: list[dict]) -> list[Finding]:
+    findings: list[Finding] = []
+    building = [packet for packet in packets if packet.get("status") == "building"]
+    if len(building) > 1:
+        active = ", ".join(packet.get("role_id", "<missing>") for packet in building)
+        findings.append(Finding("ERROR", RESUME_QUEUE, f"multiple packets occupy the serialized build slot: {active}"))
+
+    seen_role_ids: set[str] = set()
+    for packet in packets:
+        path = packet.get("_path", RESUME_QUEUE)
+        role_id_value = packet.get("role_id", "")
+        status = packet.get("status", "")
+        if not role_id_value:
+            findings.append(Finding("ERROR", path, "role_id is required"))
+        elif role_id_value in seen_role_ids:
+            findings.append(Finding("ERROR", path, f"duplicate queue role_id {role_id_value!r}"))
+        seen_role_ids.add(role_id_value)
+
+        if status not in QUEUE_STATUSES:
+            findings.append(Finding("ERROR", path, f"{role_id_value}: invalid queue status {status!r}"))
+            continue
+        if not packet.get("company") or not packet.get("role"):
+            findings.append(Finding("ERROR", path, f"{role_id_value}: company and role are required"))
+        if packet.get("track") not in MASTER_BY_TRACK:
+            findings.append(Finding("ERROR", path, f"{role_id_value}: invalid track {packet.get('track')!r}"))
+
+        gate = packet.get("gate", {})
+        proposal = packet.get("proposal", {})
+        approval = packet.get("approval", {})
+        build = packet.get("build", {})
+        failure = packet.get("failure")
+
+        if status in {"master_recommended", "gate_checked", "proposed", "approved", "building", "ready"}:
+            if not gate.get("master_resume_checked") or gate.get("gate_decision") not in GATE_DECISIONS:
+                findings.append(Finding("ERROR", path, f"{role_id_value}: status {status} requires a completed master gate"))
+        if status in {"proposed", "approved", "building", "ready"}:
+            if not proposal.get("proposal_ready_for_user") or not proposal.get("evidence_map"):
+                findings.append(Finding("ERROR", path, f"{role_id_value}: status {status} requires an evidence-map proposal"))
+        if status in {"approved", "building", "ready"}:
+            if not approval.get("approval_after_evidence_map"):
+                findings.append(Finding("ERROR", path, f"{role_id_value}: status {status} requires approval after evidence map"))
+        if status in {"building", "ready"} and not build.get("output_file"):
+            findings.append(Finding("WARN", path, f"{role_id_value}: {status} packet should record output_file"))
+        if status == "ready":
+            if build.get("mechanical_qa") not in {"Passed", "Warning Accepted"}:
+                findings.append(Finding("ERROR", path, f"{role_id_value}: ready requires mechanical_qa Passed/Warning Accepted"))
+            if build.get("final_critic") not in {"Passed", "Warning Accepted"}:
+                findings.append(Finding("ERROR", path, f"{role_id_value}: ready requires final_critic Passed/Warning Accepted"))
+            if "Warning Accepted" in {build.get("mechanical_qa"), build.get("final_critic")} and not build.get("notes"):
+                findings.append(Finding("ERROR", path, f"{role_id_value}: accepted QA/critic warnings require notes"))
+        if status == "failed":
+            if not failure:
+                findings.append(Finding("ERROR", path, f"{role_id_value}: failed packet requires failure metadata"))
+            elif failure.get("retry_target") not in RETRY_TARGETS:
+                findings.append(Finding("ERROR", path, f"{role_id_value}: invalid retry_target {failure.get('retry_target')!r}"))
+        elif failure:
+            findings.append(Finding("WARN", path, f"{role_id_value}: stale failure metadata should be moved to failure_history"))
+
+        if packet.get("feedback", {}).get("captured") and not packet.get("feedback", {}).get("signal_type"):
+            findings.append(Finding("ERROR", path, f"{role_id_value}: captured feedback requires signal_type"))
+
+    if RESUME_QUEUE == DEFAULT_RESUME_QUEUE and list(RESUME_QUEUE.glob("*.json")):
+        findings.append(
+            Finding(
+                "WARN",
+                RESUME_QUEUE,
+                "sample queue contains JSON packets; keep real queue packets outside the public repo",
+            )
+        )
+    return findings
+
+
 def load_state() -> tuple[list[dict[str, str]], list[dict[str, str]], list[Finding]]:
     job_rows, job_findings = read_csv(JOB_LOG, JOB_LOG_FIELDS)
     tracker_rows, tracker_findings = read_csv(TRACKER, TRACKER_FIELDS)
@@ -342,9 +471,25 @@ def validate_state(args: argparse.Namespace) -> int:
     job_rows, tracker_rows, findings = load_state()
     findings.extend(validate_job_log(job_rows))
     findings.extend(validate_tracker(tracker_rows, job_rows))
+    packets = queue_packets()
+    findings.extend(validate_queue(packets))
     print_findings(findings)
     print(f"\nJob log rows: {len(job_rows)}")
     print(f"Tracker rows: {len(tracker_rows)}")
+    print(f"Queue packets: {len(packets)}")
+    errors = sum(1 for finding in findings if finding.severity == "ERROR")
+    warnings = sum(1 for finding in findings if finding.severity == "WARN")
+    print(f"Summary: {errors} error(s), {warnings} warning(s)")
+    if args.strict:
+        return 1 if findings else 0
+    return 1 if errors else 0
+
+
+def validate_queue_command(args: argparse.Namespace) -> int:
+    packets = queue_packets()
+    findings = validate_queue(packets)
+    print_findings(findings)
+    print(f"\nQueue packets: {len(packets)}")
     errors = sum(1 for finding in findings if finding.severity == "ERROR")
     warnings = sum(1 for finding in findings if finding.severity == "WARN")
     print(f"Summary: {errors} error(s), {warnings} warning(s)")
@@ -408,6 +553,7 @@ def promote_role(args: argparse.Namespace) -> int:
         raise SystemExit(f"Job log status is {job_row.get('status')!r}; only Pursued/Monitoring roles can be promoted")
     if any(row.get("output_file") == args.output_file for row in tracker_rows):
         raise SystemExit(f"Tracker already has output_file {args.output_file!r}")
+    enforce_ready_queue_packet(job_row.get("company", ""), job_row.get("role", ""), args.output_file)
 
     tracker_rows.append(
         {
@@ -471,6 +617,7 @@ def mark_ready(args: argparse.Namespace) -> int:
     row = find_tracker_row(tracker_rows, output_file=args.output_file, company=args.company, role=args.role)
     if row.get("status") not in {"Draft Built", "Review Needed", "Resume Ready"}:
         raise SystemExit(f"Cannot mark ready from status {row.get('status')!r}")
+    enforce_ready_queue_packet(row.get("company", ""), row.get("role", ""), row.get("output_file", ""))
     row["status"] = "Resume Ready"
     row["review_status"] = args.review_status
     row["last_reviewed_at"] = args.reviewed_at or today()
@@ -512,65 +659,71 @@ def mark_applied(args: argparse.Namespace) -> int:
 
 
 def queue_add(args: argparse.Namespace) -> int:
-    ensure_queue_dir()
-    new_role_id = args.role_id or role_id(args.company, args.role)
-    path = queue_path(new_role_id)
-    if path.exists():
-        raise SystemExit(f"Queue packet already exists: {display_path(path)}")
-    if args.track not in MASTER_BY_TRACK:
-        raise SystemExit(f"Unsupported track {args.track!r}")
-    packet = {
-        "role_id": new_role_id,
-        "company": args.company,
-        "role": args.role,
-        "jd_url": args.jd_url or "",
-        "track": args.track,
-        "location_type": args.location_type or "",
-        "location_city": args.location_city or "",
-        "status": "pending_gate",
-        "created_at": today(),
-        "updated_at": today(),
-        "master_resume_path": MASTER_BY_TRACK[args.track],
-        "gate": {},
-        "proposal": {},
-        "approval": {},
-        "build": {},
-        "feedback": {},
-        "history": [
-            {
-                "date": today(),
-                "event": "queued",
-                "note": "Role queued for master-resume gate.",
-            }
-        ],
-    }
-    write_packet(packet)
+    with queue_lock():
+        new_role_id = args.role_id or role_id(args.company, args.role)
+        path = queue_path(new_role_id)
+        if path.exists():
+            raise SystemExit(f"Queue packet already exists: {display_path(path)}")
+        if args.track not in MASTER_BY_TRACK:
+            raise SystemExit(f"Unsupported track {args.track!r}")
+        packet = {
+            "role_id": new_role_id,
+            "company": args.company,
+            "role": args.role,
+            "jd_url": args.jd_url or "",
+            "track": args.track,
+            "location_type": args.location_type or "",
+            "location_city": args.location_city or "",
+            "status": "pending_gate",
+            "created_at": today(),
+            "updated_at": today(),
+            "master_resume_path": MASTER_BY_TRACK[args.track],
+            "gate": {},
+            "proposal": {},
+            "approval": {},
+            "build": {},
+            "feedback": {},
+            "history": [
+                {
+                    "date": today(),
+                    "event": "queued",
+                    "note": "Role queued for master-resume gate.",
+                }
+            ],
+        }
+        write_packet(packet)
     print(f"Queued role {new_role_id}: {args.company} - {args.role}")
     print(f"Next: career-ops --resume-queue {display_path(RESUME_QUEUE)} queue-gate --role-id {new_role_id} ...")
     return 0
 
 
 def queue_gate(args: argparse.Namespace) -> int:
-    packet = load_packet(args.role_id)
-    assert_status(packet, {"pending_gate", "master_recommended", "gate_checked", "failed"})
-    if args.requirement_intensity > 7 and args.gate_decision == "use_master_as_is":
-        raise SystemExit("use_master_as_is is inconsistent with requirement intensity above 7")
-    if args.requirement_intensity <= 7 and args.gate_decision == "customization_needed":
-        raise SystemExit("customization_needed with intensity <= 7 needs a stronger reason or should use the master")
-    if len(args.reason.split()) < 8:
-        raise SystemExit("--reason must explain the gate decision with at least 8 words")
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"pending_gate", "master_recommended", "gate_checked"})
+        if args.requirement_intensity > 7 and args.gate_decision == "use_master_as_is":
+            raise SystemExit("use_master_as_is is inconsistent with requirement intensity above 7")
+        if args.requirement_intensity <= 7 and args.gate_decision == "customization_needed" and not args.user_approved_tailoring:
+            raise SystemExit(
+                "customization_needed with intensity <= 7 requires --user-approved-tailoring after recommending the master"
+            )
+        if len(args.reason.split()) < 8:
+            raise SystemExit("--reason must explain the gate decision with at least 8 words")
 
-    packet["gate"] = {
-        "master_resume_checked": True,
-        "master_resume_path": packet.get("master_resume_path", ""),
-        "requirement_intensity": args.requirement_intensity,
-        "gate_decision": args.gate_decision,
-        "reason": args.reason,
-        "next_action": args.next_action,
-    }
-    packet["status"] = "master_recommended" if args.gate_decision == "use_master_as_is" else "gate_checked"
-    packet.setdefault("history", []).append({"date": today(), "event": "gate_checked", "note": args.reason})
-    write_packet(packet)
+        packet["gate"] = {
+            "master_resume_checked": True,
+            "master_resume_path": packet.get("master_resume_path", ""),
+            "requirement_intensity": args.requirement_intensity,
+            "gate_decision": args.gate_decision,
+            "reason": args.reason,
+            "next_action": args.next_action,
+        }
+        packet["proposal"] = {}
+        packet["approval"] = {}
+        packet["build"] = {}
+        packet["status"] = "master_recommended" if args.gate_decision == "use_master_as_is" else "gate_checked"
+        packet.setdefault("history", []).append({"date": today(), "event": "gate_checked", "note": args.reason})
+        write_packet(packet)
     print(f"Gate recorded for {args.role_id}: {args.gate_decision}")
     if packet["status"] == "master_recommended":
         print("Stop before tailoring unless the user explicitly approves customization anyway.")
@@ -580,110 +733,197 @@ def queue_gate(args: argparse.Namespace) -> int:
 
 
 def queue_propose(args: argparse.Namespace) -> int:
-    packet = load_packet(args.role_id)
-    assert_status(packet, {"gate_checked", "proposed", "failed"})
-    gate = packet.get("gate", {})
-    if gate.get("gate_decision") != "customization_needed":
-        raise SystemExit("queue-propose requires gate_decision=customization_needed")
-    if len(args.evidence_map.split()) < 8:
-        raise SystemExit("--evidence-map must summarize JD-to-achievement mapping")
-    if len(args.proposed_changes.split()) < 8:
-        raise SystemExit("--proposed-changes must describe concrete master-vs-tailored changes")
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"gate_checked", "proposed"})
+        gate = packet.get("gate", {})
+        if gate.get("gate_decision") != "customization_needed":
+            raise SystemExit("queue-propose requires gate_decision=customization_needed")
+        if len(args.evidence_map.split()) < 8:
+            raise SystemExit("--evidence-map must summarize JD-to-achievement mapping")
+        if len(args.proposed_changes.split()) < 8:
+            raise SystemExit("--proposed-changes must describe concrete master-vs-tailored changes")
 
-    packet["proposal"] = {
-        "evidence_map": args.evidence_map,
-        "proposed_changes": args.proposed_changes,
-        "honest_gaps": args.honest_gaps or "",
-        "claims_to_avoid": args.claims_to_avoid or "",
-        "proposal_ready_for_user": True,
-    }
-    packet["status"] = "proposed"
-    packet.setdefault("history", []).append({"date": today(), "event": "proposal_recorded", "note": args.proposed_changes})
-    write_packet(packet)
+        packet["proposal"] = {
+            "evidence_map": args.evidence_map,
+            "proposed_changes": args.proposed_changes,
+            "honest_gaps": args.honest_gaps or "",
+            "claims_to_avoid": args.claims_to_avoid or "",
+            "proposal_ready_for_user": True,
+        }
+        packet["approval"] = {}
+        packet["build"] = {}
+        packet["status"] = "proposed"
+        packet.setdefault("history", []).append({"date": today(), "event": "proposal_recorded", "note": args.proposed_changes})
+        write_packet(packet)
     print(f"Proposal recorded for {args.role_id}. Next: queue-approve after user approval.")
     return 0
 
 
 def queue_approve(args: argparse.Namespace) -> int:
-    packet = load_packet(args.role_id)
-    assert_status(packet, {"proposed", "approved"})
-    if len(args.approval_note.split()) < 8:
-        raise SystemExit("--approval-note must capture user approval or mapping direction")
-    packet["approval"] = {
-        "approved_by": args.approved_by,
-        "approved_at": args.approved_at or today(),
-        "evidence_map_presented_to_user": True,
-        "approval_after_evidence_map": True,
-        "approval_note": args.approval_note,
-    }
-    packet["status"] = "approved"
-    packet.setdefault("history", []).append({"date": today(), "event": "approved", "note": args.approval_note})
-    write_packet(packet)
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"proposed", "approved"})
+        if len(args.approval_note.split()) < 8:
+            raise SystemExit("--approval-note must capture user approval or mapping direction")
+        packet["approval"] = {
+            "approved_by": args.approved_by,
+            "approved_at": args.approved_at or today(),
+            "evidence_map_presented_to_user": True,
+            "approval_after_evidence_map": True,
+            "approval_note": args.approval_note,
+        }
+        packet["build"] = {}
+        packet["status"] = "approved"
+        packet.setdefault("history", []).append({"date": today(), "event": "approved", "note": args.approval_note})
+        write_packet(packet)
     print(f"Approved {args.role_id}. Next: queue-start-build when the serialized build slot is free.")
     return 0
 
 
 def queue_start_build(args: argparse.Namespace) -> int:
-    packet = load_packet(args.role_id)
-    assert_status(packet, {"approved", "failed"})
-    active = [item for item in queue_packets() if item.get("status") == "building" and item.get("role_id") != args.role_id]
-    if active:
-        active_ids = ", ".join(item.get("role_id", "") for item in active)
-        raise SystemExit(f"Build slot is already occupied by: {active_ids}")
-    if not packet.get("approval", {}).get("approval_after_evidence_map"):
-        raise SystemExit("Cannot build before approval_after_evidence_map=true")
-    packet["status"] = "building"
-    packet["build"] = {
-        "started_at": args.started_at or today(),
-        "output_file": args.output_file or "",
-        "build_owner": args.build_owner,
-        "serialized_build_slot": True,
-    }
-    packet.setdefault("history", []).append({"date": today(), "event": "build_started", "note": args.output_file or ""})
-    write_packet(packet)
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"approved"})
+        active = [item for item in queue_packets() if item.get("status") == "building" and item.get("role_id") != args.role_id]
+        if active:
+            active_ids = ", ".join(item.get("role_id", "") for item in active)
+            raise SystemExit(f"Build slot is already occupied by: {active_ids}")
+        if packet.get("failure"):
+            raise SystemExit("Cannot build while failure metadata is present; run queue-retry and repair the target step first")
+        if not packet.get("approval", {}).get("approval_after_evidence_map"):
+            raise SystemExit("Cannot build before approval_after_evidence_map=true")
+        packet["status"] = "building"
+        packet["build"] = {
+            "started_at": args.started_at or today(),
+            "output_file": args.output_file or "",
+            "build_owner": args.build_owner,
+            "serialized_build_slot": True,
+        }
+        packet.setdefault("history", []).append({"date": today(), "event": "build_started", "note": args.output_file or ""})
+        write_packet(packet)
     print(f"Build started for {args.role_id}. No other packet can enter building until this completes or fails.")
     return 0
 
 
 def queue_complete_build(args: argparse.Namespace) -> int:
-    packet = load_packet(args.role_id)
-    assert_status(packet, {"building", "ready"})
-    packet["status"] = "ready"
-    packet.setdefault("build", {}).update(
-        {
-            "completed_at": args.completed_at or today(),
-            "output_file": args.output_file,
-            "mechanical_qa": args.mechanical_qa,
-            "final_critic": args.final_critic,
-            "notes": args.notes or "",
-        }
-    )
-    packet.setdefault("history", []).append(
-        {"date": today(), "event": "build_completed", "note": f"{args.output_file}; {args.final_critic}"}
-    )
-    write_packet(packet)
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"building", "ready"})
+        if "Warning Accepted" in {args.mechanical_qa, args.final_critic} and not args.notes:
+            raise SystemExit("--notes is required when accepting mechanical QA or final critic warnings")
+        packet["status"] = "ready"
+        packet.setdefault("build", {}).update(
+            {
+                "completed_at": args.completed_at or today(),
+                "output_file": args.output_file,
+                "mechanical_qa": args.mechanical_qa,
+                "final_critic": args.final_critic,
+                "notes": args.notes or "",
+            }
+        )
+        packet.setdefault("history", []).append(
+            {"date": today(), "event": "build_completed", "note": f"{args.output_file}; {args.final_critic}"}
+        )
+        write_packet(packet)
     print(f"Build completed for {args.role_id}: {args.output_file}")
     print("Next: promote/mark tracker state with the normal career-ops lifecycle commands.")
     return 0
 
 
 def queue_fail(args: argparse.Namespace) -> int:
-    packet = load_packet(args.role_id)
-    assert_status(packet, {"building", "proposed", "approved", "failed"})
-    if len(args.reason.split()) < 6:
-        raise SystemExit("--reason must explain the failure")
-    packet["status"] = "failed"
-    packet["failure"] = {
-        "failed_at": args.failed_at or today(),
-        "stage": args.stage,
-        "reason": args.reason,
-        "retry_target": args.retry_target,
-    }
-    packet.setdefault("history", []).append(
-        {"date": today(), "event": "failed", "note": f"{args.stage}: {args.reason}; retry {args.retry_target}"}
-    )
-    write_packet(packet)
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"building", "proposed", "approved", "failed"})
+        if len(args.reason.split()) < 6:
+            raise SystemExit("--reason must explain the failure")
+        packet["status"] = "failed"
+        packet["failure"] = {
+            "failed_at": args.failed_at or today(),
+            "stage": args.stage,
+            "reason": args.reason,
+            "retry_target": args.retry_target,
+        }
+        packet.setdefault("history", []).append(
+            {"date": today(), "event": "failed", "note": f"{args.stage}: {args.reason}; retry {args.retry_target}"}
+        )
+        write_packet(packet)
     print(f"Marked failed: {args.role_id}. Retry target: {args.retry_target}")
+    return 0
+
+
+def queue_retry(args: argparse.Namespace) -> int:
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"failed"})
+        failure = packet.get("failure") or {}
+        retry_target = failure.get("retry_target")
+        if retry_target not in RETRY_TARGETS:
+            raise SystemExit("Failed packet has no valid retry_target")
+        if args.retry_target and args.retry_target != retry_target:
+            raise SystemExit(f"Failure retry_target is {retry_target!r}; cannot retry as {args.retry_target!r}")
+
+        packet.setdefault("failure_history", []).append(failure)
+        packet.pop("failure", None)
+        if retry_target == "master_check":
+            packet["status"] = "pending_gate"
+            packet["gate"] = {}
+            packet["proposal"] = {}
+            packet["approval"] = {}
+            packet["build"] = {}
+            next_step = "queue-gate"
+        elif retry_target == "evidence_map":
+            packet["status"] = "gate_checked"
+            packet["proposal"] = {}
+            packet["approval"] = {}
+            packet["build"] = {}
+            next_step = "queue-propose"
+        elif retry_target == "human_approval":
+            packet["status"] = "proposed"
+            packet["approval"] = {}
+            packet["build"] = {}
+            next_step = "queue-approve"
+        else:
+            packet["status"] = "approved"
+            packet["build"] = {}
+            next_step = "queue-start-build"
+
+        packet.setdefault("history", []).append(
+            {"date": today(), "event": "retry_opened", "note": f"Returned to {retry_target}: {args.note or ''}".strip()}
+        )
+        write_packet(packet)
+    print(f"Retry opened for {args.role_id}: {retry_target}. Next: {next_step}.")
+    return 0
+
+
+def queue_feedback(args: argparse.Namespace) -> int:
+    with queue_lock():
+        packet = load_packet(args.role_id)
+        assert_status(packet, {"master_recommended", "ready", "failed"})
+        if len(args.note.split()) < 6:
+            raise SystemExit("--note must capture the feedback signal with at least 6 words")
+        feedback = {
+            "captured": True,
+            "captured_at": args.captured_at or today(),
+            "signal_type": args.signal_type,
+            "note": args.note,
+            "manual_edits": args.manual_edits or "",
+            "rejected_items": args.rejected_items or "",
+            "accepted_warnings": args.accepted_warnings or "",
+            "applied_signal": args.applied_signal or "",
+            "feeds_future_evidence_selection": True,
+        }
+        packet["feedback"] = feedback
+        packet.setdefault("learning_memory", []).append(
+            {
+                "date": feedback["captured_at"],
+                "signal_type": args.signal_type,
+                "note": args.note,
+            }
+        )
+        packet.setdefault("history", []).append({"date": today(), "event": "feedback_captured", "note": args.note})
+        write_packet(packet)
+    print(f"Feedback captured for {args.role_id}; future evidence maps should use this signal.")
     return 0
 
 
@@ -746,6 +986,10 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--strict", action="store_true", help="Treat warnings as a non-zero exit")
     validate.set_defaults(func=validate_state)
 
+    validate_queue_parser = subparsers.add_parser("validate-queue", help="Validate resume orchestration queue packets")
+    validate_queue_parser.add_argument("--strict", action="store_true", help="Treat warnings as a non-zero exit")
+    validate_queue_parser.set_defaults(func=validate_queue_command)
+
     sort = subparsers.add_parser("sort", help="Sort tracker descending by date and job log ascending by search date")
     sort.set_defaults(func=sort_state)
 
@@ -793,6 +1037,11 @@ def parse_args() -> argparse.Namespace:
     queue_gate_parser.add_argument("--gate-decision", required=True, choices=sorted(GATE_DECISIONS))
     queue_gate_parser.add_argument("--reason", required=True)
     queue_gate_parser.add_argument("--next-action", required=True)
+    queue_gate_parser.add_argument(
+        "--user-approved-tailoring",
+        action="store_true",
+        help="Allow tailoring after a low-intensity gate only when the user explicitly asked to customize anyway",
+    )
     queue_gate_parser.set_defaults(func=queue_gate)
 
     queue_propose_parser = subparsers.add_parser("queue-propose", help="Record the evidence map and proposed customization")
@@ -833,6 +1082,27 @@ def parse_args() -> argparse.Namespace:
     queue_fail_parser.add_argument("--retry-target", required=True, choices=sorted(RETRY_TARGETS))
     queue_fail_parser.add_argument("--failed-at")
     queue_fail_parser.set_defaults(func=queue_fail)
+
+    queue_retry_parser = subparsers.add_parser("queue-retry", help="Open the required retry path after a queue failure")
+    queue_retry_parser.add_argument("--role-id", required=True)
+    queue_retry_parser.add_argument("--retry-target", choices=sorted(RETRY_TARGETS))
+    queue_retry_parser.add_argument("--note", default="")
+    queue_retry_parser.set_defaults(func=queue_retry)
+
+    queue_feedback_parser = subparsers.add_parser("queue-feedback", help="Capture review/application feedback for future evidence selection")
+    queue_feedback_parser.add_argument("--role-id", required=True)
+    queue_feedback_parser.add_argument(
+        "--signal-type",
+        required=True,
+        choices=["approval", "manual_edit", "rejected_item", "accepted_warning", "applied", "rejected_application"],
+    )
+    queue_feedback_parser.add_argument("--note", required=True)
+    queue_feedback_parser.add_argument("--manual-edits", default="")
+    queue_feedback_parser.add_argument("--rejected-items", default="")
+    queue_feedback_parser.add_argument("--accepted-warnings", default="")
+    queue_feedback_parser.add_argument("--applied-signal", default="")
+    queue_feedback_parser.add_argument("--captured-at")
+    queue_feedback_parser.set_defaults(func=queue_feedback)
 
     queue_status_parser = subparsers.add_parser("queue-status", help="List resume orchestration queue packets")
     queue_status_parser.add_argument("--role-id")

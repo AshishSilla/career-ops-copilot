@@ -7,7 +7,7 @@ Career Ops Copilot models a job search as a controlled workflow with two CSV-bac
 
 The sample files are anonymized demo data. For real usage, keep private CSVs outside the repository and pass them with `--job-log` and `--tracker`.
 
-The resume orchestration queue is stored as JSON packets under `data/sample_resume_queue/` by default. For real usage, keep private queue packets outside the repository and pass them with `--resume-queue`.
+The resume orchestration queue is stored as JSON packets under `data/sample_resume_queue/` by default for public-safe demos. For real usage, keep private queue packets outside the repository and pass them with `--resume-queue`. Generated sample queue JSON is ignored by Git so private evidence maps and approval notes are not accidentally committed.
 
 ## Lifecycle
 
@@ -105,11 +105,15 @@ The command updates both CSV files and creates a default follow-up date.
 The queue layer models the resume architecture directly:
 
 ```text
-pending_gate -> gate_checked -> proposed -> approved -> building -> ready
-                                           \-> failed -> retry target
+pending_gate -> master_recommended -> feedback captured / archived
+pending_gate -> gate_checked -> proposed -> approved -> building -> ready -> feedback captured
+                       ^             ^          ^            |
+                       |             |          |            |
+                       +-------------+----------+------------+
+                          queue-retry returns to retry_target
 ```
 
-Multiple roles can be in `pending_gate`, `gate_checked`, `proposed`, or `approved` at the same time. Only one role can be in `building`, because DOCX generation and tracker writes are serialized workflow steps.
+Multiple roles can be in `pending_gate`, `gate_checked`, `proposed`, or `approved` at the same time. Only one role can be in `building`, because DOCX generation and tracker writes are serialized workflow steps. The build slot is protected with a queue-level lock and atomic packet writes so concurrent CLI processes cannot both claim the build slot.
 
 Useful commands:
 
@@ -130,6 +134,27 @@ career-ops queue-fail \
   --stage final_critic \
   --reason "The strongest evidence was not above the fold." \
   --retry-target evidence_map
+
+career-ops queue-retry \
+  --role-id northstar-crm__product-analytics-lead \
+  --retry-target evidence_map \
+  --note "Reopen the evidence map and approval loop before rebuilding."
+```
+
+`queue-fail` records the failed stage and the required retry target. The packet cannot move directly from `failed` to `building`; `queue-retry` must reopen the required step first. Retry targets map to workflow steps as follows:
+
+- `master_check` returns to `pending_gate`.
+- `evidence_map` returns to `gate_checked`, requiring a new proposal.
+- `human_approval` returns to `proposed`, requiring approval again.
+- `build_resume` returns to `approved`, allowing a rebuild after build/content repair.
+
+Capture learning feedback after review, manual edits, approval/rejection, accepted warnings, or application:
+
+```bash
+career-ops queue-feedback \
+  --role-id northstar-crm__product-analytics-lead \
+  --signal-type accepted_warning \
+  --note "Accepted a minor warning because the selected evidence was stronger than the master resume."
 ```
 
 ## Validation Rules
@@ -145,11 +170,13 @@ career-ops queue-fail \
 - `Applied` rows without `applied=Yes`.
 - `Resume Ready` rows without an accepted review state.
 - Duplicate URLs and suspicious duplicate company/role pairs.
+- Queue packet schema, allowed statuses, completed gate/proposal/approval prerequisites, single active build slot, stale failures, and accepted warning notes.
 
 Strict mode treats warnings as failures:
 
 ```bash
 career-ops validate-state --strict
+career-ops validate-queue --strict
 ```
 
 ## Why This Matters
